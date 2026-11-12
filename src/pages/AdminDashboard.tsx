@@ -365,44 +365,42 @@ export default function AdminDashboard() {
 
     try {
       setIsUpdatingStatus(true);
+      const now = new Date();
       const updateData: any = {
         status: status.toLowerCase(),
         adminNote: effectiveNote || null,
         rejectionReason: status === "rejected" ? effectiveRejection : null,
-        updatedAt: serverTimestamp()
+        updatedAt: now
       };
 
       if (extraData?.pinCode) {
         updateData.pinCode = extraData.pinCode;
       }
       if (status === "completed") {
-        updateData.completedAt = serverTimestamp();
+        updateData.completedAt = now;
       }
 
-      // Update Firestore directly using Client SDK under authenticated admin security rules
-      const orderRef = doc(db, "orders", target.id);
-      await updateDoc(orderRef, updateData);
-
-      // Handle referral rewards if completing an order with referral metadata
-      let referralRewarded = false;
-      if (status === "completed" && target.referredBy && !target.isReferralRewarded) {
-        try {
-          const referrerRef = doc(db, "users", target.referredBy);
-          const referrerSnap = await getDoc(referrerRef);
-          if (referrerSnap.exists()) {
-            const currentEarnings = referrerSnap.data()?.referralEarnings || 0;
-            const currentBalance = referrerSnap.data()?.balance || 0;
-            await updateDoc(referrerRef, {
-              referralEarnings: currentEarnings + 30,
-              balance: currentBalance + 30
-            });
-            await updateDoc(orderRef, { isReferralRewarded: true });
-            referralRewarded = true;
-          }
-        } catch (refErr) {
-          console.warn("Referral auto-credit note:", refErr);
-        }
+      // The server validates the staff role and updates the order plus referral rewards atomically.
+      if (!user) throw new Error("جلسة الإدارة غير متاحة");
+      const idToken = await user.getIdToken();
+      const response = await fetch(`/api/admin/orders/${encodeURIComponent(target.id)}/status`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`
+        },
+        body: JSON.stringify({
+          status: status.toLowerCase(),
+          adminNote: effectiveNote || "",
+          rejectionReason: status === "rejected" ? effectiveRejection : "",
+          pinCode: extraData?.pinCode || ""
+        })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "تعذر تحديث الطلب في الخادم");
       }
+      const referralRewarded = result.referralRewarded === true;
 
       // Optimistic update of local orders array immediately
       setOrders(prev => prev.map(o => o.id === target.id ? { ...o, ...updateData, status: status.toLowerCase(), updatedAt: new Date() } : o));
