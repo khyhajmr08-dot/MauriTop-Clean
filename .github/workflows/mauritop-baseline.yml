@@ -28,12 +28,12 @@ jobs:
       head_sha: ${{ steps.commit.outputs.head_sha }}
     steps:
       - name: Checkout isolated working branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: chore/mauritop-phase1-baseline-ci
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -70,12 +70,12 @@ jobs:
       contents: read
     steps:
       - name: Checkout validated source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.reconcile_lockfile.outputs.head_sha || github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -96,7 +96,7 @@ jobs:
 
       - name: Upload validated npm lockfile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mauritop-phase1-npm-lockfile
           path: package-lock.json
