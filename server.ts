@@ -3,11 +3,10 @@ import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { GoogleGenAI } from "@google/genai";
 import path from "path";
-import { getFirestore, Firestore } from "firebase-admin/firestore";
+import { getFirestore, Firestore, FieldValue } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
-import { getAuth } from "firebase-admin/auth";
-import { initializeApp, applicationDefault, getApps, App } from "firebase-admin/app";
-import * as admin from "firebase-admin";
+import { getAuth, DecodedIdToken } from "firebase-admin/auth";
+import { initializeApp, applicationDefault, getApps, App, cert } from "firebase-admin/app";
 import crypto from "crypto";
 import fs from "fs";
 
@@ -53,7 +52,7 @@ async function startServer() {
 
           if (getApps().length === 0) {
             adminApp = initializeApp({
-              credential: admin.credential.cert(parsedCred),
+              credential: cert(parsedCred),
               projectId: targetProjectId
             });
           } else {
@@ -455,13 +454,13 @@ async function startServer() {
   });
 
   // Helper to verify Firebase ID Token (for authenticated user or admin requests)
-  const verifyAuthToken = async (req: express.Request): Promise<admin.auth.DecodedIdToken | null> => {
+  const verifyAuthToken = async (req: express.Request): Promise<DecodedIdToken | null> => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
     const token = authHeader.split("Bearer ")[1];
     try {
       if (adminApp) {
-        return await admin.auth(adminApp).verifyIdToken(token);
+        return await getAuth(adminApp).verifyIdToken(token);
       }
     } catch (e) {
       console.warn("[Auth] Failed to verify ID token:", e);
@@ -474,7 +473,7 @@ async function startServer() {
     return Boolean(authHeader && authHeader.startsWith("Bearer ") && authHeader.split("Bearer ")[1]?.trim());
   };
 
-  const isOwnerUser = (decoded: admin.auth.DecodedIdToken | null) => {
+  const isOwnerUser = (decoded: DecodedIdToken | null) => {
     if (!decoded) return false;
     const email = (decoded.email || "").toLowerCase().trim();
     return email === "khyhajmr08@gmail.com" || decoded.uid === "PqXqqCgdC1eYPz4HKHHLtDRejPD3";
@@ -550,7 +549,7 @@ async function startServer() {
         const withdrawalRef = firestore.collection("withdrawals").doc();
         transaction.update(userRef, {
           loyaltyPoints: currentPoints - amount,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          updatedAt: FieldValue.serverTimestamp()
         });
         transaction.set(withdrawalRef, {
           userId: decoded.uid,
@@ -559,14 +558,14 @@ async function startServer() {
           amount,
           bankilyPhone,
           status: "pending",
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
           adminNote: ""
         });
         transaction.set(withdrawalLockRef, {
           withdrawalId: withdrawalRef.id,
           status: "pending",
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
+          createdAt: FieldValue.serverTimestamp()
         });
 
         return { withdrawalId: withdrawalRef.id, remainingPoints: currentPoints - amount };
@@ -630,7 +629,7 @@ async function startServer() {
       const requestRef = firestore.collection("kyc_requests").doc(targetUid);
       const reviewerIdentifier = decoded.email || decoded.uid;
       const reviewerName = decoded.name || decoded.email?.split("@")[0] || "إدارة MAURITOP";
-      const now = admin.firestore.FieldValue.serverTimestamp();
+      const now = FieldValue.serverTimestamp();
 
       await firestore.runTransaction(async (transaction) => {
         const [userSnap, requestSnap] = await Promise.all([
@@ -808,7 +807,7 @@ async function startServer() {
           if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error("WITHDRAWAL_AMOUNT_INVALID");
           transaction.update(userRef, {
             loyaltyPoints: currentPoints + amount,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            updatedAt: FieldValue.serverTimestamp()
           });
         }
 
@@ -816,7 +815,7 @@ async function startServer() {
           status: targetStatus,
           adminNote: targetStatus === "rejected" ? adminNote : "",
           processedBy: decoded.uid,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          updatedAt: FieldValue.serverTimestamp()
         });
         if (withdrawalLockSnap.exists && withdrawalLockSnap.data()?.withdrawalId === withdrawalSnap.id) {
           transaction.delete(withdrawalLockRef);
@@ -831,7 +830,7 @@ async function startServer() {
             : `تم رفض طلب السحب وإعادة ${withdrawal.amount} أوقية إلى رصيدك. السبب: ${adminNote}`,
           read: false,
           type: targetStatus === "approved" ? "success" : "error",
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
+          createdAt: FieldValue.serverTimestamp()
         });
 
         return { success: true, status: targetStatus, refunded: targetStatus === "rejected" };
@@ -1449,8 +1448,8 @@ async function startServer() {
             attemptId: clientAttemptId,
             trackingToken: isGuest ? trackingToken : null,
             trackingTokenHash: isGuest ? trackingTokenHash : null,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp()
           };
 
           transaction.set(newOrderRef, orderData);
@@ -1461,7 +1460,7 @@ async function startServer() {
             payloadHash: payloadHash,
             trackingToken: isGuest ? trackingToken : null,
             trackingTokenHash: isGuest ? trackingTokenHash : null,
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
+            createdAt: FieldValue.serverTimestamp()
           });
 
           if (activeOrderLockRef) {
@@ -1471,7 +1470,7 @@ async function startServer() {
               recipientId: String(recipientId),
               orderId: newOrderId,
               status: "pending",
-              createdAt: admin.firestore.FieldValue.serverTimestamp()
+              createdAt: FieldValue.serverTimestamp()
             });
           }
 
@@ -1696,7 +1695,7 @@ async function startServer() {
         const notificationRef = currentData.userId
           ? firestore.collection("notifications").doc()
           : null;
-        const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+        const serverTimestamp = FieldValue.serverTimestamp();
         const updates: Record<string, any> = {
           status: targetStatus,
           updatedAt: serverTimestamp
@@ -1830,7 +1829,7 @@ async function startServer() {
         : (previousStaffSnap.exists && previousStaff.active === true);
 
       const updateData: any = {
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
         updatedBy: decoded.email || decoded.uid
       };
       if (role !== undefined) updateData.role = role;
@@ -1845,7 +1844,7 @@ async function startServer() {
         await firestore.collection("users").doc(targetUid).set({
           role: role === 'admin' ? 'admin' : (role === 'user' ? 'user' : 'staff'),
           staffRole: role,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          updatedAt: FieldValue.serverTimestamp()
         }, { merge: true });
       }
 
@@ -1869,7 +1868,7 @@ async function startServer() {
         targetUid,
         newRole: role || null,
         performedBy: decoded.email || decoded.uid,
-        timestamp: admin.firestore.FieldValue.serverTimestamp()
+        timestamp: FieldValue.serverTimestamp()
       }).catch(err => console.warn("[Audit Log] Staff role change log error:", err));
 
       return res.json({ success: true, message: "تم تحديث رتبة وصلاحيات المستخدم بنجاح" });
