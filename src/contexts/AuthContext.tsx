@@ -127,6 +127,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 (firebaseUser.email && ADMIN_EMAILS.includes(firebaseUser.email.toLowerCase().trim())) ||
                 ADMIN_UIDS.includes(firebaseUser.uid);
 
+              let initialReferrerId: string | null = null;
+              try {
+                const storedReferrerId = localStorage.getItem('referrerId');
+                if (storedReferrerId && storedReferrerId !== firebaseUser.uid) {
+                  initialReferrerId = storedReferrerId;
+                }
+              } catch {
+                // Browser storage may be unavailable; the account can still be created safely.
+              }
+
               const defaultProfile: UserProfile = {
                 uid: firebaseUser.uid,
                 name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
@@ -137,6 +147,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 referralsCount: 0,
                 referralEarnings: 0,
                 loyaltyPoints: 0,
+                isReferralRewarded: false,
+                referredBy: initialReferrerId,
                 reviewStatus: 'Active',
                 isVerified: false,
                 createdAt: serverTimestamp(),
