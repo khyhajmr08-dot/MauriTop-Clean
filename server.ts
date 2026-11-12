@@ -1301,8 +1301,7 @@ async function startServer() {
       if (recipientId && effectiveUserId) {
         try {
           let activeOrdersRef = firestore.collection("orders")
-            .where("serviceId", "==", serviceId)
-            .where("status", "==", "pending");
+            .where("serviceId", "==", serviceId);
 
           if (decodedUser) {
             activeOrdersRef = activeOrdersRef.where("userId", "==", effectiveUserId) as any;
@@ -1314,10 +1313,12 @@ async function startServer() {
             activeOrdersRef = activeOrdersRef.where("userId", "==", effectiveUserId) as any;
           }
 
-          const activeOrdersQuery = await activeOrdersRef.limit(20).get();
+          const activeOrdersQuery = await activeOrdersRef.limit(30).get();
 
           const hasDuplicateActive = activeOrdersQuery.docs.some(docSnap => {
             const d = docSnap.data();
+            const existingStatus = String(d.status || "").toLowerCase();
+            if (!["pending", "approved", "shipped"].includes(existingStatus)) return false;
             if (d.attemptId === clientAttemptId) return false; // Handled by idempotency replay
             const prevRecipient = d.fields?.playerId || d.fields?.email || d.fields?.phone || d.fields?.cardId || d.fields?.username || d.senderPhone;
             return prevRecipient === recipientId;
@@ -1680,13 +1681,13 @@ async function startServer() {
         transaction.update(orderRef, updates);
 
         if (activeOrderLockRef) {
-          if (targetStatus === "pending") {
+          if (["pending", "approved", "shipped"].includes(targetStatus)) {
             transaction.set(activeOrderLockRef, {
-              userId: currentData.userId || "",
+              userId: lockIdentity,
               serviceId: currentData.serviceId || "",
               recipientId: String(recipientId),
               orderId,
-              status: "pending",
+              status: targetStatus,
               updatedAt: serverTimestamp
             }, { merge: true });
           } else if (activeOrderLockSnap?.exists && activeOrderLockSnap.data()?.orderId === orderId) {
