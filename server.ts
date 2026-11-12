@@ -516,37 +516,138 @@ async function startServer() {
         });
       }
 
-      // Built-in catalog for standard services
+      // Server-side fallback catalog mirrors the current public SERVICES catalog.
+      // Firestore records override these defaults whenever an administrator has customized a service.
       const defaultServices: Record<string, any> = {
         pubg: {
-          name: "PUBG Mobile",
-          nameAr: "شحن شدات ببجي موبايل (PUBG UC)",
-          status: "active",
-          pricingMode: "packages",
+          name: "PUBG Mobile", nameAr: "شحن شدات ببجي موبايل (PUBG UC)", status: "active", pricingMode: "package",
           packages: [
             { amount: 55, quantity: 60, title: "60 UC" },
             { amount: 240, quantity: 325, title: "325 UC" },
-            { amount: 470, quantity: 660, title: "660 UC" }
+            { amount: 470, quantity: 660, title: "660 UC" },
+            { amount: 1190, quantity: 1800, title: "1800 UC" },
+            { amount: 2290, quantity: 3850, title: "3850 UC" },
+            { amount: 4490, quantity: 8100, title: "8100 UC" }
           ],
-          fields: [{ id: "playerId", labelAr: "معرف اللاعب", required: true }]
+          fields: [
+            { id: "playerId", labelAr: "معرف اللاعب", required: true, pattern: "^[0-9]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
         },
         freefire: {
-          name: "Free Fire",
-          nameAr: "شحن جواهر فري فاير (Free Fire)",
-          status: "active",
-          pricingMode: "packages",
+          name: "Free Fire", nameAr: "شحن جواهر فري فاير (Free Fire)", status: "active", pricingMode: "package",
           packages: [
-            { amount: 50, quantity: 110, title: "110 جواهر" },
-            { amount: 100, quantity: 240, title: "240 جواهر" },
-            { amount: 150, quantity: 380, title: "380 جواهر" }
+            { amount: 45, quantity: 100, title: "100 جوهرة" },
+            { amount: 135, quantity: 310, title: "310 جوهرة" },
+            { amount: 220, quantity: 520, title: "520 جوهرة" },
+            { amount: 440, quantity: 1060, title: "1060 جوهرة" },
+            { amount: 880, quantity: 2180, title: "2180 جوهرة" }
           ],
-          fields: [{ id: "playerId", labelAr: "معرف اللاعب", required: true }]
+          fields: [
+            { id: "playerId", labelAr: "معرف اللاعب", required: true, pattern: "^[0-9]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
         },
+        "cod-mobile": {
+          name: "Call of Duty Mobile", nameAr: "شحن CP كول أوف ديوتي موبايل", status: "active", pricingMode: "package",
+          packages: [
+            { amount: 55, quantity: 80, title: "80 CP" },
+            { amount: 260, quantity: 420, title: "420 CP" },
+            { amount: 520, quantity: 880, title: "880 CP" }
+          ],
+          fields: [
+            { id: "playerId", labelAr: "معرف اللاعب", required: true, pattern: "^[0-9]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
+        },
+        "snapchat-plus": {
+          name: "Snapchat Plus", nameAr: "اشتراك سناب شات بلس (Snapchat+)", status: "active", pricingMode: "package",
+          packages: [
+            { amount: 250, quantity: 3, title: "اشتراك 3 أشهر" },
+            { amount: 490, quantity: 6, title: "اشتراك 6 أشهر" },
+            { amount: 990, quantity: 12, title: "اشتراك سنة كاملة (12 شهر)" }
+          ],
+          fields: [
+            { id: "username", labelAr: "اسم المستخدم", required: true },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
+        },
+        "tod-vip": {
+          name: "TOD VIP - 1 Mois", nameAr: "تود VIP - شهر واحد", status: "active", pricingMode: "fixed", priceMru: 180,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "shahid-vip": {
+          name: "Shahid VIP - 1 Mois", nameAr: "شاهد VIP - شهر واحد", status: "active", pricingMode: "fixed", priceMru: 150,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        netflix: {
+          name: "Netflix - 1 Mois", nameAr: "نتفليكس - شهر واحد", status: "active", pricingMode: "fixed", priceMru: 250,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "spotify-premium": {
+          name: "Spotify Premium - 1 Mois", nameAr: "سبوتيفاي بريميوم - شهر واحد", status: "active", pricingMode: "fixed", priceMru: 120,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "apple-10": {
+          name: "Apple Gift Card 10$ (US)", nameAr: "بطاقة آبل 10 دولار (متجر أمريكي US)", status: "active", pricingMode: "fixed", priceMru: 450,
+          packages: [{ amount: 450, quantity: 1, title: "بطاقة 10$ (متجر US)" }],
+          fields: [
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
+        },
+        "chatgpt-plus": {
+          name: "ChatGPT Plus", nameAr: "اشتراك شات جي بي تي بلس (ChatGPT Plus)", status: "active", pricingMode: "fixed", priceMru: 850,
+          packages: [{ amount: 850, quantity: 30, title: "اشتراك 30 يوماً" }],
+          fields: [
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
+        },
+        "apple-25": {
+          name: "Apple Gift Card 25$", nameAr: "بطاقة آبل 25 دولار", status: "active", pricingMode: "fixed", priceMru: 1250,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "playstation-10": {
+          name: "PlayStation Card 10$", nameAr: "بطاقة بلايستيشن 10 دولار", status: "active", pricingMode: "fixed", priceMru: 520,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "googleplay-10": {
+          name: "Google Play Card 10$", nameAr: "بطاقة جوجل بلاي 10 دولار", status: "active", pricingMode: "fixed", priceMru: 520,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "fb-ads": {
+          name: "Facebook Ads", nameAr: "إعلانات فيسبوك", status: "active", pricingMode: "range", minAmountMru: 100, maxAmountMru: 10000,
+          fields: [
+            { id: "pageLink", labelAr: "رابط الصفحة", required: true, pattern: "^https://.*$" },
+            { id: "budgetMru", labelAr: "الميزانية", required: true, pattern: "^[0-9]+$" },
+            { id: "objective", labelAr: "هدف الحملة", required: true },
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }
+          ]
+        },
+        "fb-verification": {
+          name: "Facebook Verification Help", nameAr: "مساعدة طلب توثيق فيسبوك", status: "active", pricingMode: "quote",
+          fields: [
+            { id: "profileLink", labelAr: "رابط الحساب", required: true, pattern: "^https://.*$" },
+            { id: "username", labelAr: "اسم المستخدم", required: true },
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }
+          ]
+        },
+        "icloud-service": {
+          name: "iCloud Service", nameAr: "خدمة آي كلاود", status: "active", pricingMode: "fixed", priceMru: 150,
+          fields: [{ id: "appleIdEmail", labelAr: "بريد Apple ID", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "visa-recharge": {
+          name: "Visa Virtual Recharge", nameAr: "شحن فيزا افتراضية", status: "active", pricingMode: "range", minAmountMru: 100, maxAmountMru: 5000,
+          fields: [
+            { id: "cardId", labelAr: "رقم البطاقة", required: true, pattern: "^[0-9A-Za-z]+$" },
+            { id: "amountMru", labelAr: "المبلغ", required: true, pattern: "^[0-9]+$" },
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }
+          ]
+        },
+        // Legacy built-in game services retained for records/catalog compatibility.
         mobilelegends: {
-          name: "Mobile Legends",
-          nameAr: "شحن ماسات موبايل ليجندز",
-          status: "active",
-          pricingMode: "packages",
+          name: "Mobile Legends", nameAr: "شحن ماسات موبايل ليجندز", status: "active", pricingMode: "packages",
           packages: [
             { amount: 50, quantity: 80, title: "80 ماسة" },
             { amount: 100, quantity: 160, title: "160 ماسة" }
@@ -554,10 +655,7 @@ async function startServer() {
           fields: [{ id: "playerId", labelAr: "معرف اللاعب", required: true }]
         },
         fifa: {
-          name: "EA Sports FC",
-          nameAr: "نقاط FC Mobile (فيفا موبايل)",
-          status: "active",
-          pricingMode: "packages",
+          name: "EA Sports FC", nameAr: "نقاط FC Mobile (فيفا موبايل)", status: "active", pricingMode: "packages",
           packages: [
             { amount: 100, quantity: 500, title: "500 نقطة FC" },
             { amount: 200, quantity: 1200, title: "1200 نقطة FC" }
@@ -565,6 +663,7 @@ async function startServer() {
           fields: [{ id: "playerId", labelAr: "معرف اللاعب", required: true }]
         }
       };
+
 
       // 1. Fetch Trusted Service Configuration
       let serviceData: any = null;
