@@ -84,26 +84,13 @@ service cloud.firestore {
 
     // --- ORDERS ---
     match /orders/{orderId} {
-      // Users can read their own orders. Staff and Admin can read all.
+      // Orders are readable only by their authenticated owner or authorized staff.
+      // Guest orders are served through the server endpoint after verification of the private tracking token.
       allow read: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
 
-      // Single-document tracking: A guest with their exact orderId can read their order document
-      allow get: if isAdmin() || 
-                    (isSignedIn() && resource.data.userId == request.auth.uid) ||
-                    (resource.data.isGuest == true && resource.data.trackingToken != null);
-
-      // Authenticated users creating for themselves OR guests with isGuest == true
-      allow create: if (
-        (isSignedIn() && request.resource.data.userId == request.auth.uid) ||
-        (!isSignedIn() && request.resource.data.isGuest == true && request.resource.data.userId.matches('^guest_[a-zA-Z0-9_-]+$'))
-      ) &&
-      request.resource.data.status == 'pending' &&
-      request.resource.data.amount is number && request.resource.data.amount >= 0 &&
-      request.resource.data.serviceId is string &&
-      (!('pinCode' in request.resource.data) || request.resource.data.pinCode == null) &&
-      (!('adminNote' in request.resource.data) || request.resource.data.adminNote == null) &&
-      (!('rejectionReason' in request.resource.data) || request.resource.data.rejectionReason == null) &&
-      (!('completedAt' in request.resource.data) || request.resource.data.completedAt == null);
+      // All new orders must pass through the trusted server endpoint. The Admin SDK bypasses rules.
+      // This prevents client-side price tampering and bypassing atomic idempotency checks.
+      allow create: if false;
 
       // Orders managers and owner can update status/notes
       allow update: if isOwner() || hasStaffRole('orders_manager') || isUserRole('orders_manager') || isUserRole('admin');
@@ -112,8 +99,9 @@ service cloud.firestore {
     }
 
     // --- ORDER IDEMPOTENCY ---
+    // Idempotency records contain server-only hashes and tracking credentials.
     match /order_idempotency/{attemptId} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
 
     // --- NOTIFICATIONS ---
