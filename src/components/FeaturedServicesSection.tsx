@@ -146,7 +146,7 @@ export function FeaturedServicesSection({
             <ServiceCard 
               service={service} 
               featured={true} 
-              priority={index < 4}
+              priority={index < 2}
               badge={index === 0 ? (language === 'ar' ? 'الأكثر طلباً 🔥' : 'Top 🔥') : undefined}
               onClick={onOpenService ? () => onOpenService(service) : undefined}
             />
