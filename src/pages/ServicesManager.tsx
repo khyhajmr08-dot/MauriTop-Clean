@@ -1201,7 +1201,7 @@ export default function ServicesManager() {
                   )}
                 </div>
 
-                {formData.pricingMode === "range" && (
+                {(formData.pricingMode === "range" || formData.pricingMode === "custom") && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-5 bg-[#111B2E] rounded-2xl border border-[#243247]">
                     <div className="space-y-2">
                       <label className="text-xs font-black text-[#A8B3C5] uppercase tracking-wider">
