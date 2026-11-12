@@ -284,7 +284,10 @@ export default function KycVerification() {
 
       await updateDoc(doc(db, 'users', user.uid), kycData);
       try {
-        await setDoc(doc(db, 'kyc_requests', user.uid), kycData, { merge: true });
+        await setDoc(doc(db, 'kyc_requests', user.uid), {
+          ...kycData,
+          reviewStatus: 'pending'
+        }, { merge: true });
       } catch (e) {
         console.warn('kyc_requests collection write fallback:', e);
       }
