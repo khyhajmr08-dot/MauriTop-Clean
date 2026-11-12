@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp, updateDoc, increment, addDoc, collection } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 import { useToast } from '../contexts/ToastContext';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -43,46 +43,31 @@ export default function Register() {
         const userSnap = await getDoc(userRef);
         
         if (!userSnap.exists()) {
-           const role = result.user.email?.toLowerCase().trim() === 'khyhajmr08@gmail.com' ? 'admin' : 'user';
-           const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-           const referrerId = localStorage.getItem('referrerId');
+          const isOwner = result.user.email?.toLowerCase().trim() === 'khyhajmr08@gmail.com';
+          const role = isOwner ? 'admin' : 'user';
+          const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+          const referrerId = localStorage.getItem('referrerId');
+          const safeReferrerId = referrerId && referrerId !== result.user.uid ? referrerId : null;
 
-           await setDoc(userRef, {
-             uid: result.user.uid,
-             name: result.user.displayName || 'مستخدم موري توب',
-             email: result.user.email,
-             role: role,
-             blocked: false,
-             reviewStatus: 'Active',
-             createdAt: serverTimestamp(),
-             referralCode: referralCode,
-             referredBy: (referrerId && referrerId !== result.user.uid) ? referrerId : null,
-             referralsCount: 0,
-             referralEarnings: 0,
-             isReferralRewarded: false
-           });
+          await setDoc(userRef, {
+            uid: result.user.uid,
+            name: result.user.displayName || 'مستخدم موري توب',
+            email: result.user.email,
+            role,
+            blocked: false,
+            isVerified: false,
+            reviewStatus: 'Active',
+            createdAt: serverTimestamp(),
+            referralCode,
+            referredBy: safeReferrerId,
+            referralsCount: 0,
+            referralEarnings: 0,
+            loyaltyPoints: 0,
+            isReferralRewarded: false
+          });
 
-           // Add referral reward logic
-           if (referrerId && referrerId !== result.user.uid) {
-             try {
-               const referrerRef = doc(db, 'users', referrerId);
-               await updateDoc(referrerRef, {
-                 loyaltyPoints: increment(30)
-               });
-               await addDoc(collection(db, 'notifications'), {
-                 userId: referrerId,
-                 title: "إحالة جديدة ناجحة!",
-                 body: "لقد حصلت على 30 أوقية جديدة لإحالة مستخدم جديد!",
-                 read: false,
-                 type: 'success',
-                 createdAt: serverTimestamp()
-               });
-             } catch (e) {
-               console.warn("Referral reward error:", e);
-             }
-           }
-           
-           localStorage.removeItem('referrerId');
+          // Referral credit is added by the trusted server only after the first completed order.
+          localStorage.removeItem('referrerId');
         } else {
            localStorage.removeItem('referrerId');
         }
