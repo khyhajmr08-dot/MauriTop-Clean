@@ -56,7 +56,7 @@ export default function Register() {
             role,
             blocked: false,
             isVerified: false,
-            reviewStatus: 'Active',
+            reviewStatus: 'Not Verified',
             createdAt: serverTimestamp(),
             referralCode,
             referredBy: safeReferrerId,
