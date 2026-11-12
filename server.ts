@@ -1548,6 +1548,28 @@ async function startServer() {
           throw new Error("COMPLETED_ORDER_IMMUTABLE");
         }
 
+        const recipientId = currentData.fields?.playerId || currentData.fields?.email ||
+          currentData.fields?.phone || currentData.fields?.cardId ||
+          currentData.fields?.username || currentData.senderPhone || "";
+        const activeOrderLockId = recipientId
+          ? crypto.createHash("sha256").update(JSON.stringify([
+              String(currentData.userId || ""),
+              String(currentData.serviceId || ""),
+              String(recipientId)
+            ])).digest("hex")
+          : null;
+        const activeOrderLockRef = activeOrderLockId
+          ? firestore.collection("order_active_locks").doc(activeOrderLockId)
+          : null;
+        const activeOrderLockSnap = activeOrderLockRef
+          ? await transaction.get(activeOrderLockRef)
+          : null;
+
+        if (targetStatus === "pending" && activeOrderLockSnap?.exists &&
+            activeOrderLockSnap.data()?.orderId !== orderId) {
+          throw new Error("DUPLICATE_ACTIVE_ORDER");
+        }
+
         // Read all documents before writing anything in this Firestore transaction.
         let userRef: any = null;
         let userSnap: any = null;
@@ -1580,6 +1602,21 @@ async function startServer() {
         if (targetStatus === "completed") updates.completedAt = serverTimestamp;
 
         transaction.update(orderRef, updates);
+
+        if (activeOrderLockRef) {
+          if (targetStatus === "pending") {
+            transaction.set(activeOrderLockRef, {
+              userId: currentData.userId || "",
+              serviceId: currentData.serviceId || "",
+              recipientId: String(recipientId),
+              orderId,
+              status: "pending",
+              updatedAt: serverTimestamp
+            }, { merge: true });
+          } else if (activeOrderLockSnap?.exists && activeOrderLockSnap.data()?.orderId === orderId) {
+            transaction.delete(activeOrderLockRef);
+          }
+        }
 
         if (shouldRewardReferral && userRef && userSnap && referrerRef && referrerSnap) {
           const referrerData = referrerSnap.data() || {};
@@ -1643,6 +1680,9 @@ async function startServer() {
       }
       if (err.message === "COMPLETED_ORDER_IMMUTABLE") {
         return res.status(400).json({ error: "COMPLETED_ORDER_IMMUTABLE", message: "الطلب المكتمل لا يمكن تعديله إلا بواسطة المالك" });
+      }
+      if (err.message === "DUPLICATE_ACTIVE_ORDER") {
+        return res.status(409).json({ error: "DUPLICATE_ACTIVE_ORDER", message: "لا يمكن إرجاع الطلب إلى قيد الانتظار لوجود طلب نشط آخر لنفس المستلم." });
       }
       console.error("[Admin Update Order Error]:", err);
       return res.status(500).json({ error: "INTERNAL_ERROR", message: "فشل تحديث حالة الطلب" });
