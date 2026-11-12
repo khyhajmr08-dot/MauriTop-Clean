@@ -486,11 +486,11 @@ async function startServer() {
       }
 
       const amount = Number(req.body?.amount);
-      const bankilyPhone = String(req.body?.bankilyPhone || "").replace(/\\D/g, "").slice(-8);
+      const bankilyPhone = String(req.body?.bankilyPhone || "").replace(/\D/g, "").slice(-8);
       if (!Number.isSafeInteger(amount) || amount < 500) {
         return res.status(400).json({ error: "INVALID_WITHDRAWAL_AMOUNT", message: "الحد الأدنى للسحب هو 500 أوقية جديدة" });
       }
-      if (!/^\\d{8}$/.test(bankilyPhone)) {
+      if (!/^\d{8}$/.test(bankilyPhone)) {
         return res.status(400).json({ error: "INVALID_WITHDRAWAL_PHONE", message: "يرجى إدخال رقم بنكيلي صحيح مكوّن من 8 أرقام" });
       }
 
