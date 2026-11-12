@@ -44,6 +44,8 @@
   html {
     scroll-behavior: smooth;
     -webkit-tap-highlight-color: transparent;
+    width: 100%;
+    min-width: 0;
   }
 
   body {
@@ -54,6 +56,15 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     min-height: 100vh;
+    width: 100%;
+    min-width: 0;
+    overflow-x: clip;
+  }
+
+  #root {
+    width: 100%;
+    min-width: 0;
+    overflow-x: clip;
   }
 
   /* Direction Isolation for LTR numbers & codes inside RTL Arabic text */
@@ -170,6 +181,42 @@
   /* Modal Dialog Containers */
   .modal-dialog-surface {
     @apply bg-[#0B1120] border border-[#243247] rounded-2xl shadow-2xl overflow-hidden;
+  }
+}
+
+
+/* Mobile-safe service cards: switch price/action to a vertical footer when the
+   card's actual grid width is too narrow for both controls on one line. */
+.service-card-container {
+  container: service-card / inline-size;
+  min-width: 0;
+}
+
+@container service-card (max-width: 180px) {
+  .service-card-content {
+    padding: 0.625rem;
+  }
+
+  .service-card-footer {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .service-card-price {
+    align-items: center;
+    text-align: center;
+  }
+
+  .service-card-price-amount {
+    overflow-wrap: anywhere;
+    text-align: center;
+  }
+
+  .service-card-action {
+    width: 100%;
+    min-height: 2rem;
+    white-space: normal;
   }
 }
 
