@@ -504,12 +504,26 @@ export default function AdminDashboard() {
     const newRole = isTargetAdmin ? 'user' : 'admin';
     try {
       setRoleActionUserId(targetUser.id);
-      await updateDoc(doc(db, "users", targetUser.id), {
-        role: newRole,
-        updatedAt: serverTimestamp()
+      if (!user) throw new Error("جلسة المالك غير متاحة");
+      const idToken = await user.getIdToken();
+      const response = await fetch("/api/admin/staff/roles", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`
+        },
+        body: JSON.stringify({
+          targetUid: targetUser.id,
+          role: newRole,
+          active: newRole === "admin"
+        })
       });
-      
-      setUsersList(prev => prev.map(u => u.id === targetUser.id ? { ...u, role: newRole } : u));
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "تعذر تحديث الصلاحيات");
+      }
+
+      setUsersList(prev => prev.map(u => u.id === targetUser.id ? { ...u, role: newRole, staffRole: newRole } : u));
       cacheService.remove("admin_users");
       
       showToast(
