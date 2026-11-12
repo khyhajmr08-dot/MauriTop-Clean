@@ -1,5 +1,5 @@
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
-import { storage } from '../lib/firebase';
+import { auth, storage } from '../lib/firebase';
 import { fileToBase64 } from '../lib/utils';
 import { persistentImageCache } from '../lib/persistentImageCache';
 
@@ -7,26 +7,29 @@ import { persistentImageCache } from '../lib/persistentImageCache';
  * Converts a base64 / data URL string to a standard Blob safely.
  */
 export function dataURLtoBlob(dataurl: string): Blob {
+  if (!dataurl || typeof dataurl !== 'string') {
+    throw new Error("بيانات الصورة فارغة أو غير صالحة");
+  }
+
+  const match = dataurl.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=\r\n]+)$/i);
+  if (!match) {
+    throw new Error("صيغة الصورة غير مدعومة. استخدم JPEG أو PNG أو WEBP أو GIF");
+  }
+
   try {
-    if (!dataurl || typeof dataurl !== 'string') {
-      return new Blob([], { type: 'image/webp' });
+    const mime = match[1].toLowerCase();
+    const base64 = match[2].replace(/\s/g, "");
+    const binary = atob(base64);
+    if (!binary.length) throw new Error("الملف فارغ");
+
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
     }
-    if (!dataurl.includes(',')) {
-      return new Blob([dataurl], { type: 'image/webp' });
-    }
-    const arr = dataurl.split(',');
-    const mimeMatch = arr[0].match(/:(.*?);/);
-    const mime = mimeMatch ? mimeMatch[1] : 'image/webp';
-    const bstr = atob(arr[1]);
-    let n = bstr.length;
-    const u8arr = new Uint8Array(n);
-    while (n--) {
-      u8arr[n] = bstr.charCodeAt(n);
-    }
-    return new Blob([u8arr], { type: mime });
-  } catch (e) {
-    console.warn("[Upload] dataURLtoBlob conversion warning:", e);
-    return new Blob([], { type: 'image/webp' });
+    return new Blob([bytes], { type: mime });
+  } catch (error) {
+    console.warn("[Upload] Invalid image data:", error);
+    throw new Error("تعذر قراءة بيانات الصورة. يرجى اختيار الصورة مرة أخرى");
   }
 }
 
@@ -34,8 +37,13 @@ export function dataURLtoBlob(dataurl: string): Blob {
  * Converts a Blob or File to a Data URL string.
  */
 export async function blobToDataURL(file: File | Blob | string): Promise<string> {
-  if (typeof file === 'string') return file;
-  if (!file) return '';
+  if (typeof file === 'string') {
+    if (!/^data:image\/(?:jpeg|png|webp|gif);base64,/i.test(file)) {
+      throw new Error("رابط أو بيانات الصورة غير صالحين للرفع");
+    }
+    return file;
+  }
+  if (!file || file.size <= 0) throw new Error("الملف المحدد فارغ");
   
   try {
     const res = await fileToBase64(file);
@@ -78,15 +86,37 @@ async function uploadToServerApi(
   }
 
   onProgress?.(50);
-  const response = await fetch('/api/upload', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      data: dataUrl,
-      path: path,
-      filename: (file as any)?.name || path
-    })
-  });
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const currentUser = auth.currentUser;
+  if (currentUser) {
+    // A signed-in upload must never silently lose its identity on the server fallback.
+    const idToken = await currentUser.getIdToken();
+    if (!idToken) throw new Error("تعذر التحقق من جلسة تسجيل الدخول قبل رفع الملف");
+    headers.Authorization = `Bearer ${idToken}`;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 45000);
+  let response: Response;
+  try {
+    response = await fetch('/api/upload', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        data: dataUrl,
+        path,
+        filename: (file as any)?.name || path
+      }),
+      signal: controller.signal
+    });
+  } catch (networkError: any) {
+    if (networkError?.name === "AbortError") {
+      throw new Error("انتهت مهلة رفع الصورة إلى التخزين السحابي");
+    }
+    throw networkError;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
@@ -123,11 +153,15 @@ export async function uploadServiceImage(
     blob = file;
   }
 
+  if (!blob.size || blob.size > 8 * 1024 * 1024) {
+    throw new Error("حجم صورة الخدمة يجب أن يكون أكبر من صفر وأقل من 8 ميجابايت");
+  }
+
   // 1. Direct Firebase Storage Resumable Upload
   try {
     const storageRef = ref(storage, storagePath);
     const task = uploadBytesResumable(storageRef, blob, {
-      contentType: 'image/webp',
+      contentType: blob.type || 'image/webp',
       customMetadata: { serviceId: cleanId, uploadedAt: new Date().toISOString() }
     });
 
@@ -170,7 +204,7 @@ export async function uploadServiceImage(
     // 2. Server upload fallback
     try {
       const serverUrl = await uploadToServerApi(file, storagePath, onProgress);
-      if (serverUrl && (serverUrl.startsWith("http") || serverUrl.startsWith("/uploads/"))) {
+      if (serverUrl && serverUrl.startsWith("https://firebasestorage.googleapis.com/")) {
         await persistentImageCache.saveServiceImage(cleanId, serverUrl);
         return serverUrl;
       }
@@ -195,17 +229,15 @@ export async function uploadFileWithProgress(
 ): Promise<string> {
   // 1. First attempt: Firebase Storage
   try {
-    const firebasePromise = new Promise<string>((resolve, reject) => {
-      let uploadTarget: Blob;
-      if (typeof file === 'string') {
-        uploadTarget = dataURLtoBlob(file);
-      } else {
-        uploadTarget = file;
-      }
+    const uploadTarget = typeof file === 'string' ? dataURLtoBlob(file) : file;
+    if (!uploadTarget || uploadTarget.size <= 0 || uploadTarget.size > 8 * 1024 * 1024) {
+      throw new Error("حجم الملف يجب أن يكون أكبر من صفر وأقل من 8 ميجابايت");
+    }
 
+    const firebasePromise = new Promise<string>((resolve, reject) => {
       const storageRef = ref(storage, path);
       const task = uploadBytesResumable(storageRef, uploadTarget, {
-        contentType: (file as any)?.type || 'image/webp'
+        contentType: uploadTarget.type || (file as any)?.type || 'image/webp'
       });
 
       const timeout = setTimeout(() => {
@@ -246,7 +278,7 @@ export async function uploadFileWithProgress(
     // 2. Server /api/upload fallback
     try {
       const serverUrl = await uploadToServerApi(file, path, onProgress);
-      if (serverUrl && (serverUrl.startsWith("http") || serverUrl.startsWith("/uploads/"))) {
+      if (serverUrl && serverUrl.startsWith("https://firebasestorage.googleapis.com/")) {
         return serverUrl;
       }
       throw new Error("لم يتم استلام رابط صالح من الخادم");
