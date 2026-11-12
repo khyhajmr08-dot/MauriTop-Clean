@@ -80,7 +80,9 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
   // Real-time Firestore sync when modal is open to reflect live changes
   useEffect(() => {
-    if (!isOpen || !order?.id) return;
+    // Guest order details come from the private server tracking-token API.
+    // Do not attempt a direct Firestore read for a guest order.
+    if (!isOpen || !order?.id || order?.isGuest === true) return;
 
     const unsub = onSnapshot(
       doc(db, "orders", order.id),
