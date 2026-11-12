@@ -619,7 +619,7 @@ async function startServer() {
         const address = String(userData.kyc_address_gps || "").trim();
         const imageUrl = String(userData.kyc_id_image || "").trim();
         if (
-          fullName.split(/\\s+/).filter(Boolean).length < 2 ||
+          fullName.split(/\s+/).filter(Boolean).length < 2 ||
           phoneDigits.length < 8 ||
           !idNumber ||
           !city ||
