@@ -2,12 +2,20 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node"],
-    "lib": ["ES2020", "DOM"],
+    "types": [
+      "node"
+    ],
+    "lib": [
+      "ES2020",
+      "DOM"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "skipLibCheck": true
   },
-  "include": ["server.ts"]
+  "include": [
+    "server.ts",
+    "api/**/*.ts"
+  ]
 }
