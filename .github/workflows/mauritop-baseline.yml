@@ -94,6 +94,32 @@ jobs:
       - name: Build frontend and Express server
         run: npm run build
 
+      - name: Smoke-test local Express and Vite startup
+        run: |
+          set -euo pipefail
+          npm run dev > /tmp/mauritop-dev-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 30); do
+            status_code="$(curl --silent --output /tmp/mauritop-health.json --write-out '%{http_code}' http://127.0.0.1:3000/api/health 2>/dev/null || true)"
+            if [ "$status_code" = "200" ] || [ "$status_code" = "503" ]; then
+              node -e "const x = require('/tmp/mauritop-health.json'); if (!x.status || !x.projectId) process.exit(1)"
+              ready=1
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat /tmp/mauritop-dev-server.log
+            echo "Express/Vite server did not respond to /api/health."
+            exit 1
+          fi
+          cat /tmp/mauritop-dev-server.log
+
       - name: Upload validated npm lockfile
         if: always()
         uses: actions/upload-artifact@v6
