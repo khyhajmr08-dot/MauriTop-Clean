@@ -5,7 +5,7 @@
   "type": "module",
   "main": "server.ts",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "node --env-file-if-exists=.env.local --import=tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist",
@@ -48,5 +48,8 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1"
+  },
+  "engines": {
+    "node": ">=22.9.0"
   }
 }
