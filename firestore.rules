@@ -80,11 +80,15 @@ service cloud.firestore {
         isSignedIn() &&
         request.auth.uid == userId &&
         !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'role', 'staffRole', 'blocked', 'isVerified', 'reviewStatus',
+          'role', 'staffRole', 'blocked', 'isVerified',
           'referralsCount', 'referralEarnings', 'isReferralRewarded',
           'firstCompletedOrderAt', 'balance', 'loyaltyPoints', 'referredBy',
           'phoneStatus', 'phoneRejectReason'
-        ])
+        ]) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['reviewStatus']) ||
+          request.resource.data.reviewStatus == 'Under Review') &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['kyc_completed']) ||
+          request.resource.data.kyc_completed == false)
       );
       allow delete: if isOwner();
     }
