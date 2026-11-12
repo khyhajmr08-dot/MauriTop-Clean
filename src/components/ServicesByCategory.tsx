@@ -145,7 +145,7 @@ function CategorySection({ category, items, onOpenService, isArabic, sortOption 
               haptic.light();
               onOpenService(service);
             }}
-            priority={idx < 4}
+            priority={idx < 2}
             badge={idx === 0 && sortOption === 'popular' ? (isArabic ? "الأكثر طلباً 🔥" : "Top 🔥") : undefined}
           />
         ))}
