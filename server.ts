@@ -3,7 +3,6 @@ import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { GoogleGenAI } from "@google/genai";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { getAuth } from "firebase-admin/auth";
@@ -13,6 +12,10 @@ import crypto from "crypto";
 import fs from "fs";
 
 import firebaseConfig from "./firebase-applet-config.json";
+
+// Vercel Node Functions expect an exported Node HTTP server. Local development
+// uses the same instance and starts listening only outside the Vercel runtime.
+const vercelHttpServer = createServer();
 
 async function startServer() {
   let adminApp: App | undefined;
@@ -355,9 +358,31 @@ async function startServer() {
     }
   });
 
-  const server = createServer(app);
-  const wss = new WebSocketServer({ server, path: '/live' });
-  const PORT = 3000;
+  const server = vercelHttpServer;
+  const wss = new WebSocketServer({ noServer: true });
+
+  // Keep the public /live endpoint stable. Vercel rewrites it internally to /api/live;
+  // accepting both paths also keeps direct local development compatible.
+  server.on("upgrade", (request, socket, head) => {
+    let pathname = "";
+    try {
+      pathname = new URL(request.url || "/", "http://localhost").pathname;
+    } catch {
+      socket.destroy();
+      return;
+    }
+
+    if (pathname !== "/live" && pathname !== "/api/live") {
+      socket.destroy();
+      return;
+    }
+
+    wss.handleUpgrade(request, socket, head, (webSocket) => {
+      wss.emit("connection", webSocket, request);
+    });
+  });
+
+  const PORT = Number(process.env.PORT || 3000);
   
   // Lazy init Gemini client to avoid crashes if API_KEY is missing
   let ai: GoogleGenAI | null = null;
@@ -2279,18 +2304,32 @@ async function startServer() {
 
   // Vite middleware
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({ 
-      server: { middlewareMode: true, hmr: false }, 
-      appType: "spa" 
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      server: { middlewareMode: true, hmr: false },
+      appType: "spa"
     });
     app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
+  } else if (!process.env.VERCEL) {
+    // Local production preview only. Vercel serves dist as static output itself.
+    const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get('*all', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
+    app.get("*all", (req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
 
-  server.listen(PORT, "0.0.0.0", () => console.log(`Server running on http://localhost:${PORT}`));
+  // Attach Express after all route registrations. Vercel owns the listener; local
+  // start/dev commands listen on the same HTTP server directly.
+  server.on("request", app);
+
+  if (!process.env.VERCEL) {
+    server.listen(PORT, "0.0.0.0", () => console.log(`Server running on http://localhost:${PORT}`));
+  } else {
+    console.log("[MAURITOP] HTTP Function initialized with the /live WebSocket upgrade path.");
+  }
 }
 
-startServer();
+void startServer().catch((error) => {
+  console.error("[MAURITOP] Server initialization failed:", error);
+});
+
+export default vercelHttpServer;
