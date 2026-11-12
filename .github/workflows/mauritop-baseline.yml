@@ -1,0 +1,58 @@
+name: MAURITOP baseline validation
+
+on:
+  push:
+    branches:
+      - chore/mauritop-phase1-baseline-ci
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mauritop-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Resolve dependencies, type-check and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Record toolchain versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Reconcile npm lockfile with package.json
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+      - name: Install exactly from the reconciled lockfile
+        run: npm ci --no-audit --no-fund
+
+      - name: Run TypeScript check
+        run: npm run lint
+
+      - name: Build frontend and Express server
+        run: npm run build
+
+      - name: Upload reconciled npm lockfile for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mauritop-phase1-npm-lockfile
+          path: package-lock.json
+          if-no-files-found: warn
+          retention-days: 7
