@@ -667,9 +667,13 @@ async function startServer() {
 
       // 1. Fetch Trusted Service Configuration
       let serviceData: any = null;
+      let serviceHasDbRecord = false;
       try {
         const serviceDoc = await firestore.collection("services").doc(serviceId).get();
-        if (serviceDoc.exists) serviceData = serviceDoc.data();
+        if (serviceDoc.exists) {
+          serviceData = serviceDoc.data();
+          serviceHasDbRecord = true;
+        }
       } catch (serviceErr: any) {
         console.error("[Order Creation] Service lookup failed:", serviceErr?.message || serviceErr);
         return res.status(503).json({ error: "SERVICE_LOOKUP_UNAVAILABLE", message: "تعذر التحقق من الخدمة حالياً. يرجى المحاولة لاحقاً." });
@@ -735,9 +739,11 @@ async function startServer() {
           return res.status(400).json({ error: "INVALID_AMOUNT", message: "المبلغ المطلوب يجب أن يكون رقماً صحيحاً موجباً بالأوقية MRU" });
         }
 
-        const configuredPackages = Array.isArray(serviceData.packages) && serviceData.packages.length > 0
+        // Use the server catalog only when no admin Firestore record exists.
+        // An explicit empty package list in Firestore must not be overridden by stale built-in packages.
+        const configuredPackages = Array.isArray(serviceData.packages)
           ? serviceData.packages
-          : (defaultServices[serviceId]?.packages || []);
+          : (!serviceHasDbRecord ? (defaultServices[serviceId]?.packages || []) : []);
         const hasCustomBounds = serviceData.minAmountMru !== undefined || serviceData.minAmount !== undefined ||
           serviceData.maxAmountMru !== undefined || serviceData.maxAmount !== undefined;
 
