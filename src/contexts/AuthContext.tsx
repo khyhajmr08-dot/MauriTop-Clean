@@ -155,7 +155,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 updatedAt: serverTimestamp(),
               };
 
-              setDoc(userDocRef, defaultProfile, { merge: true }).catch((err) => {
+              setDoc(userDocRef, defaultProfile, { merge: true }).catch(async (err) => {
+                // A stale referral ID must not leave a valid signed-in account without a profile.
+                if (defaultProfile.referredBy) {
+                  const fallbackProfile = { ...defaultProfile, referredBy: null };
+                  try {
+                    await setDoc(userDocRef, fallbackProfile, { merge: true });
+                    setProfile(fallbackProfile);
+                    try { localStorage.removeItem('referrerId'); } catch { /* ignore */ }
+                    return;
+                  } catch (fallbackErr) {
+                    console.warn('[Auth] Profile initialization fallback failed:', fallbackErr);
+                  }
+                }
                 console.warn('[Auth] Failed to initialize user document:', err);
               });
 
