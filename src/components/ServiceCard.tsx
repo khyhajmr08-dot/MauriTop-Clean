@@ -149,7 +149,7 @@ export const ServiceCard: React.FC<ServiceCardProps> = ({
       onClick={handleClick}
       dir={isRtl ? 'rtl' : 'ltr'}
       className={cn(
-        "group relative cursor-pointer",
+        "service-card-container group relative cursor-pointer min-w-0 max-w-full",
         "flex flex-col justify-between",
         "w-full h-full min-h-[290px] sm:min-h-[320px]",
         "bg-[#0B1120] rounded-2xl overflow-hidden",
@@ -196,7 +196,7 @@ export const ServiceCard: React.FC<ServiceCardProps> = ({
       </div>
 
       {/* 2. Content Body: Product Name + Short Description */}
-      <div className="p-2.5 sm:p-3 flex flex-col justify-between flex-1 border-t border-[#243247]/70">
+      <div className="service-card-content min-w-0 p-2.5 sm:p-3 flex flex-col justify-between flex-1 border-t border-[#243247]/70">
         <div className="space-y-1">
           <h3 
             className="text-xs sm:text-sm font-black text-[#F8FAFC] text-center leading-snug group-hover:text-emerald-300 transition-colors line-clamp-2 min-h-[2.5rem] flex items-center justify-center"
@@ -217,16 +217,16 @@ export const ServiceCard: React.FC<ServiceCardProps> = ({
         </div>
 
         {/* 3. Footer Row: Aligned Price + Category Action Button */}
-        <div className="mt-2.5 pt-2 border-t border-white/5 flex items-center justify-between gap-1.5">
+        <div className="service-card-footer mt-2.5 pt-2 border-t border-white/5 flex items-center justify-between gap-1.5">
           {/* Price Section */}
-          <div className="flex flex-col text-right min-w-0">
+          <div className="service-card-price flex flex-col text-right min-w-0">
             {priceDisplay.prefix && (
               <span className="text-[9px] text-[#A8B3C5] font-medium leading-none mb-0.5">
                 {priceDisplay.prefix}
               </span>
             )}
             <span className={cn(
-              "font-mono font-black text-xs sm:text-sm tracking-tight",
+              "service-card-price-amount max-w-full font-mono font-black text-xs sm:text-sm tracking-tight",
               priceDisplay.isText ? "text-[#06B6D4]" : "text-[#10B981]"
             )}>
               {priceDisplay.amount}
@@ -237,7 +237,7 @@ export const ServiceCard: React.FC<ServiceCardProps> = ({
           <button
             type="button"
             tabIndex={-1}
-            className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#10B981] hover:bg-emerald-400 text-slate-950 text-[11px] sm:text-xs font-black transition-all flex items-center gap-1 shadow-xs shrink-0 cursor-pointer group-hover:shadow-emerald-500/20 group-hover:shadow-md"
+            className="service-card-action max-w-full min-w-0 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#10B981] hover:bg-emerald-400 text-slate-950 text-[11px] sm:text-xs font-black transition-all flex items-center justify-center gap-1 shadow-xs shrink-0 cursor-pointer group-hover:shadow-emerald-500/20 group-hover:shadow-md"
           >
             <span>{actionLabel}</span>
             {isRtl ? (
