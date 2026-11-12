@@ -649,7 +649,7 @@ async function startServer() {
             throw new Error("KYC_IMAGE_URL_INVALID");
           }
 
-          const imageFile = getStorage().bucket(firebaseConfig.storageBucket).file(objectName);
+          const imageFile = getStorage(adminApp).bucket(firebaseConfig.storageBucket).file(objectName);
           const [imageMetadata] = await imageFile.getMetadata();
           const downloadTokens = String(imageMetadata.metadata?.firebaseStorageDownloadTokens || "")
             .split(",")
