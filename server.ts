@@ -561,8 +561,17 @@ async function startServer() {
       if (!decoded) {
         return res.status(401).json({ error: "UNAUTHORIZED", message: "تسجيل الدخول الإداري مطلوب" });
       }
+      const firestore = getDb();
       if (!isOwnerUser(decoded)) {
-        return res.status(403).json({ error: "FORBIDDEN", message: "هذه العملية متاحة لمالك المنصة فقط" });
+        const [staffSnap, userSnap] = await Promise.all([
+          firestore.collection("staff").doc(decoded.uid).get(),
+          firestore.collection("users").doc(decoded.uid).get()
+        ]);
+        const staffRole = staffSnap.exists && staffSnap.data()?.active === true ? staffSnap.data()?.role : null;
+        const userRole = userSnap.exists ? userSnap.data()?.role : null;
+        if (!["admin", "finance_manager"].includes(staffRole) && userRole !== "admin") {
+          return res.status(403).json({ error: "FORBIDDEN", message: "ليست لديك صلاحية إدارة طلبات السحب" });
+        }
       }
 
       const targetStatus = String(req.body?.status || "").toLowerCase();
@@ -574,7 +583,6 @@ async function startServer() {
         return res.status(400).json({ error: "REJECTION_REASON_REQUIRED", message: "سبب رفض طلب السحب إلزامي" });
       }
 
-      const firestore = getDb();
       const withdrawalRef = firestore.collection("withdrawals").doc(req.params.withdrawalId);
       const result = await firestore.runTransaction(async (transaction) => {
         const withdrawalSnap = await transaction.get(withdrawalRef);
