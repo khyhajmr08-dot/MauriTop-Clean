@@ -615,6 +615,7 @@ async function startServer() {
         const fullName = String(userData.kyc_full_name || "").trim();
         const phoneDigits = String(userData.kyc_phone || "").replace(/[^0-9]/g, "");
         const idNumber = String(userData.kyc_id_number || "").trim();
+        const idType = String(userData.kyc_id_type || "").trim();
         const city = String(userData.kyc_city || "").trim();
         const address = String(userData.kyc_address_gps || "").trim();
         const imageUrl = String(userData.kyc_id_image || "").trim();
@@ -622,6 +623,7 @@ async function startServer() {
           fullName.split(/\s+/).filter(Boolean).length < 2 ||
           phoneDigits.length < 8 ||
           !idNumber ||
+          !["national_id", "passport", "residence_card"].includes(idType) ||
           !city ||
           !address ||
           !userData.kyc_submitted_at ||
