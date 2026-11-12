@@ -63,6 +63,7 @@ service cloud.firestore {
         request.resource.data.blocked == false &&
         (!('reviewStatus' in request.resource.data) || request.resource.data.reviewStatus == 'Not Verified') &&
         (!('isVerified' in request.resource.data) || request.resource.data.isVerified == false) &&
+        (!('kyc_completed' in request.resource.data) || request.resource.data.kyc_completed == false) &&
         (!('referralsCount' in request.resource.data) || request.resource.data.referralsCount == 0) &&
         (!('referralEarnings' in request.resource.data) || request.resource.data.referralEarnings == 0) &&
         (!('loyaltyPoints' in request.resource.data) || request.resource.data.loyaltyPoints == 0) &&
