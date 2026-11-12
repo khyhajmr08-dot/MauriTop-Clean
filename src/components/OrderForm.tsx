@@ -490,11 +490,18 @@ export default function OrderForm({ preSelectedServiceId }: { preSelectedService
         return language === 'ar' ? "يرجى إدخال مبلغ صحيح" : "Veuillez entrer un montant valide";
       }
 
-      if (service.pricingMode === "range") {
-        const min = service.minAmountMru || 0;
-        const max = service.maxAmountMru || Infinity;
+      if (service.pricingMode === "range" || service.pricingMode === "custom") {
+        const min = Number(service.minAmountMru ?? service.minAmount ?? 0);
+        const max = Number(service.maxAmountMru ?? service.maxAmount ?? 0);
+        if (!Number.isSafeInteger(min) || min <= 0 || !Number.isSafeInteger(max) || max < min) {
+          return language === "ar"
+            ? "حدود السعر لهذه الخدمة غير مكتملة. يرجى مراجعة الإدارة."
+            : "Les limites de prix de ce service ne sont pas configurées.";
+        }
         if (numAmount < min || numAmount > max) {
-          return "المبلغ خارج النطاق المسموح";
+          return language === "ar"
+            ? `المبلغ يجب أن يكون بين ${min} و${max} MRU`
+            : `Le montant doit être compris entre ${min} et ${max} MRU`;
         }
       } else {
         if (service.minAmount && numAmount < service.minAmount) {
