@@ -61,6 +61,7 @@ service cloud.firestore {
         request.auth.uid == userId &&
         request.resource.data.role == 'user' &&
         request.resource.data.blocked == false &&
+        (!('reviewStatus' in request.resource.data) || request.resource.data.reviewStatus == 'Not Verified') &&
         (!('isVerified' in request.resource.data) || request.resource.data.isVerified == false) &&
         (!('referralsCount' in request.resource.data) || request.resource.data.referralsCount == 0) &&
         (!('referralEarnings' in request.resource.data) || request.resource.data.referralEarnings == 0) &&
