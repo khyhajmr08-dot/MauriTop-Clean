@@ -161,12 +161,17 @@ service cloud.firestore {
       // Users can submit their document but cannot approve or set verification status
       allow create: if (isSignedIn() && request.auth.uid == userId) &&
                        (!('isVerified' in request.resource.data) || request.resource.data.isVerified == false) &&
-                       (!('reviewStatus' in request.resource.data) || request.resource.data.reviewStatus == 'pending');
-      // Only authorized staff can change verification status; users can only re-upload their documents while pending
+                       (!('reviewStatus' in request.resource.data) || request.resource.data.reviewStatus == 'pending') &&
+                       !('reviewedBy' in request.resource.data) &&
+                       !('reviewedByName' in request.resource.data) &&
+                       !('reviewedAt' in request.resource.data);
+      // Only authorized staff can approve/reject. Users may re-submit a rejected request as pending.
       allow update: if isOwner() || hasStaffRole('orders_manager') || isUserRole('admin') || (
-        isSignedIn() && 
+        isSignedIn() &&
         request.auth.uid == userId &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isVerified', 'reviewStatus', 'reviewedBy', 'reviewedByName', 'reviewedAt', 'adminNote'])
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isVerified', 'reviewedBy', 'reviewedByName', 'reviewedAt', 'adminNote']) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['reviewStatus']) ||
+          (request.resource.data.reviewStatus == 'pending' && request.resource.data.isVerified == false))
       );
       allow delete: if isOwner();
     }
