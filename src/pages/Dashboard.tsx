@@ -972,8 +972,8 @@ export default function Dashboard() {
                 </h2>
                 <p className="text-xs text-slate-400">
                   {isArabic
-                    ? "ابحث عن طلبك برقم الطلب (Order ID) أو رمز التتبع أو رقم هاتف المرسل لمعرفة حالته فوراً."
-                    : "Recherchez votre commande par son identifiant ou numéro de téléphone."}
+                    ? "تابع طلبك باستخدام رمز التتبع السري الذي استلمته بعد إرسال الطلب."
+                    : "Suivez votre commande avec le jeton de suivi privé reçu."}
                 </p>
               </div>
             </div>
@@ -995,7 +995,7 @@ export default function Dashboard() {
                   setGuestSearchQuery(e.target.value);
                   if (guestSearchError) setGuestSearchError("");
                 }}
-                placeholder={isArabic ? "أدخل رقم الطلب (مثال: #A1B2C3D4) أو رقم الهاتف..." : "Entrez le N° de commande ou téléphone..."}
+                placeholder={isArabic ? "أدخل رمز التتبع السري الخاص بطلبك..." : "Entrez votre jeton de suivi privé..."}
                 className="w-full bg-[#070B14] border border-[#243247] rounded-xl px-4 py-3 text-xs sm:text-sm font-mono text-white placeholder:text-slate-500 outline-none focus:border-emerald-400 transition-all"
               />
             </div>
