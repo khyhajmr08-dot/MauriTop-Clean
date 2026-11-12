@@ -496,6 +496,10 @@ export default function AdminDashboard() {
 
   const handleToggleUserRole = async (targetUser: any) => {
     if (!targetUser) return;
+    if (!isOwner) {
+      showToast("تغيير أدوار المستخدمين متاح لمالك المنصة فقط", "error");
+      return;
+    }
     const isTargetAdmin = targetUser.role === 'admin';
     const newRole = isTargetAdmin ? 'user' : 'admin';
     try {
@@ -617,6 +621,10 @@ export default function AdminDashboard() {
   };
 
   const handleToggleBlock = async (uid: string, currentStatus: boolean) => {
+    if (!isOwner) {
+      showToast("حظر الحسابات وإلغاء الحظر متاح لمالك المنصة فقط", "error");
+      return;
+    }
     try {
       setBlockingUserId(uid);
       await updateDoc(doc(db, "users", uid), {
@@ -633,6 +641,10 @@ export default function AdminDashboard() {
   };
 
   const handleMarkPhoneStatus = async (uid: string, status: 'invalid' | 'valid') => {
+    if (!isOwner) {
+      showToast("اعتماد أرقام الهواتف متاح لمالك المنصة فقط", "error");
+      return;
+    }
     try {
       setPhoneActionUserId(uid);
       await updateDoc(doc(db, "users", uid), {
@@ -1904,7 +1916,7 @@ export default function AdminDashboard() {
                                         isPhoneInvalid ? (
                                           <button
                                             onClick={() => handleMarkPhoneStatus(u.id, 'valid')}
-                                            disabled={phoneActionUserId === u.id}
+                                            disabled={!isOwner || phoneActionUserId === u.id}
                                             className="text-[10px] font-black px-2.5 py-1 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-600 hover:text-white transition-all cursor-pointer active:scale-95 disabled:opacity-50"
                                             title="تأكيد صحة الرقم"
                                           >
@@ -1925,7 +1937,7 @@ export default function AdminDashboard() {
                                       <button
                                         type="button"
                                         onClick={() => handleToggleUserRole(u)}
-                                        disabled={roleActionUserId === u.id}
+                                        disabled={!isOwner || roleActionUserId === u.id}
                                         className={cn(
                                           "text-[10px] font-black px-2.5 py-1 rounded-xl border transition-all cursor-pointer active:scale-95 disabled:opacity-50 inline-flex items-center gap-1",
                                           u.role === 'admin'
@@ -1951,7 +1963,7 @@ export default function AdminDashboard() {
 
                                       <button 
                                         onClick={() => handleToggleBlock(u.id, !!u.blocked)}
-                                        disabled={blockingUserId === u.id}
+                                        disabled={!isOwner || blockingUserId === u.id}
                                         className={cn(
                                           "text-[11px] font-black px-3 py-1.5 rounded-xl transition-all inline-flex items-center justify-center min-w-[70px] disabled:opacity-50 cursor-pointer active:scale-95",
                                           u.blocked ? "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-600 hover:text-white" : "bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-600 hover:text-white"
