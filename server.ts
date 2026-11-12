@@ -806,19 +806,66 @@ async function startServer() {
         }
       }
 
-      // 4. Validate Required Service Fields
+      // 4. Validate required service fields from the trusted Firestore record or the server catalog.
+      const fieldPatternById: Record<string, string> = {
+        playerId: "^[0-9]+$",
+        gameId: "^[0-9]+$",
+        email: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+        appleIdEmail: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+        phone: "^[0-9]{8,15}$",
+        amountMru: "^[0-9]+$",
+        budgetMru: "^[0-9]+$",
+        cardId: "^[0-9A-Za-z]+$",
+        pageLink: "^https://.*$",
+        profileLink: "^https://.*$"
+      };
+      const fallbackFields = defaultServices[serviceId]?.fields || [];
+      const declaredRequiredIds = Array.isArray(serviceData.requiredFields) ? serviceData.requiredFields : [];
+      const declaredOptionalIds = Array.isArray(serviceData.optionalFields) ? serviceData.optionalFields : [];
+      const declaredFieldIds = Array.from(new Set([...declaredRequiredIds, ...declaredOptionalIds]));
+      const serviceFields = Array.isArray(serviceData.fields) && serviceData.fields.length > 0
+        ? serviceData.fields
+        : (declaredFieldIds.length > 0
+            ? declaredFieldIds.map((id: string) => ({
+                id,
+                labelAr: id,
+                required: declaredRequiredIds.includes(id),
+                pattern: fieldPatternById[id]
+              }))
+            : fallbackFields);
+
+      if (!clientFields || typeof clientFields !== "object" || Array.isArray(clientFields)) {
+        return res.status(400).json({ error: "FIELDS_INVALID", message: "بيانات حقول الخدمة غير صالحة" });
+      }
+
       const safeFields: Record<string, any> = {};
-      if (Array.isArray(serviceData.fields)) {
-        for (const f of serviceData.fields) {
-          const val = (clientFields && clientFields[f.id] !== undefined) ? String(clientFields[f.id]).trim() : "";
-          if (f.required && !val) {
-            return res.status(400).json({ error: "FIELD_REQUIRED", message: `الحقل (${f.labelAr || f.label}) مطلوب` });
-          }
-          if (f.pattern && val && !new RegExp(f.pattern).test(val)) {
-            return res.status(400).json({ error: "FIELD_INVALID", message: `صيغة الحقل (${f.labelAr || f.label}) غير صحيحة` });
-          }
-          safeFields[f.id] = val;
+      for (const field of serviceFields) {
+        if (!field || typeof field.id !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(field.id)) continue;
+        const value = clientFields[field.id] !== undefined ? String(clientFields[field.id]).trim() : "";
+        const label = field.labelAr || field.label || field.id;
+
+        if (field.required && !value) {
+          return res.status(400).json({ error: "FIELD_REQUIRED", message: `الحقل (${label}) مطلوب` });
         }
+
+        const pattern = field.pattern || fieldPatternById[field.id];
+        if (pattern && value) {
+          try {
+            if (!new RegExp(pattern).test(value)) {
+              return res.status(400).json({ error: "FIELD_INVALID", message: `صيغة الحقل (${label}) غير صحيحة` });
+            }
+          } catch {
+            console.error("[Order Creation] Invalid configured validation pattern for field:", field.id);
+            return res.status(409).json({ error: "SERVICE_FIELD_RULE_INVALID", message: "إعدادات أحد حقول الخدمة غير صالحة. يرجى مراجعة الإدارة." });
+          }
+        }
+        if (field.minLength && value.length < Number(field.minLength)) {
+          return res.status(400).json({ error: "FIELD_INVALID", message: `الحقل (${label}) أقصر من الحد المسموح` });
+        }
+        if (field.maxLength && value.length > Number(field.maxLength)) {
+          return res.status(400).json({ error: "FIELD_INVALID", message: `الحقل (${label}) أطول من الحد المسموح` });
+        }
+        safeFields[field.id] = value;
       }
 
       // 5. Determine Authenticated User or Guest identity
