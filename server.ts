@@ -5,6 +5,7 @@ import { GoogleGenAI } from "@google/genai";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
 import { initializeApp, applicationDefault, getApps, App } from "firebase-admin/app";
 import * as admin from "firebase-admin";
 import crypto from "crypto";
@@ -217,68 +218,137 @@ async function startServer() {
   app.use(express.json({ limit: "20mb" }));
   app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
-  // Serve persistent uploads statically in both dev and production
-  const uploadsDir = path.join(process.cwd(), "public", "uploads");
-  if (!fs.existsSync(uploadsDir)) {
-    try {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    } catch (e) {
-      console.warn("[Uploads] Directory creation warning:", e);
-    }
-  }
-  app.use("/uploads", express.static(uploadsDir));
-
-  // Resilient File/Image Upload Endpoint (Seamless fallback when Cloud Storage bucket is unprovisioned)
+  // Durable upload endpoint: always writes to the configured Firebase Storage bucket.
+  // The local filesystem is intentionally not used because serverless instances are ephemeral.
   app.post("/api/upload", async (req, res) => {
     try {
-      const { data, path: desiredPath, filename } = req.body;
-      if (!data || typeof data !== "string") {
-        return res.status(400).json({ error: "DATA_REQUIRED", message: "بيانات الصورة مطلوبة" });
+      const body = req.body || {};
+      const data = body.data;
+      const requestedPath = body.path;
+
+      if (typeof data !== "string" || typeof requestedPath !== "string") {
+        return res.status(400).json({ error: "DATA_REQUIRED", message: "بيانات الصورة ومسار التخزين مطلوبان" });
       }
 
-      // Parse data URL: data:image/png;base64,....
-      const matches = data.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-      let buffer: Buffer;
-      let extension = "webp";
-
-      if (matches && matches.length === 3) {
-        const mimeType = matches[1];
-        if (mimeType.includes("jpeg") || mimeType.includes("jpg")) extension = "jpg";
-        else if (mimeType.includes("png")) extension = "png";
-        else if (mimeType.includes("webp")) extension = "webp";
-        else if (mimeType.includes("gif")) extension = "gif";
-        buffer = Buffer.from(matches[2], "base64");
-      } else {
-        buffer = Buffer.from(data, "base64");
+      const pathParts = requestedPath.split("/");
+      if (pathParts.length !== 2) {
+        return res.status(400).json({ error: "INVALID_UPLOAD_PATH", message: "مسار رفع الملف غير صالح" });
       }
 
-      if (buffer.length === 0) {
-        return res.status(400).json({ error: "EMPTY_FILE", message: "الملف فارغ" });
+      const folder = pathParts[0];
+      const requestedName = pathParts[1];
+      const allowedFolders = ["services", "posts", "receipts", "kyc"];
+      if (!allowedFolders.includes(folder) || !/^[A-Za-z0-9_-]{1,140}\.(?:webp|jpe?g|png|gif)$/i.test(requestedName)) {
+        return res.status(400).json({ error: "INVALID_UPLOAD_PATH", message: "نوع أو اسم مسار الملف غير مسموح" });
       }
 
-      // Max 10MB limit for safe storage
-      if (buffer.length > 10 * 1024 * 1024) {
-        return res.status(413).json({ error: "FILE_TOO_LARGE", message: "حجم الملف يتجاوز الحد المسموح به (10 ميجابايت)" });
+      const matches = data.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=\r\n]+)$/i);
+      if (!matches) {
+        return res.status(415).json({ error: "UNSUPPORTED_FILE_TYPE", message: "يسمح فقط بصور JPEG وPNG وWEBP وGIF" });
       }
 
-      const randomSuffix = crypto.randomBytes(8).toString("hex");
-      let cleanBaseName = filename ? path.basename(filename, path.extname(filename)).replace(/[^a-zA-Z0-9_-]/g, "_") : "img";
-      if (desiredPath) {
-        const cleanDesired = path.basename(desiredPath, path.extname(desiredPath)).replace(/[^a-zA-Z0-9_-]/g, "_");
-        if (cleanDesired) cleanBaseName = cleanDesired;
+      const mimeType = matches[1].toLowerCase();
+      const base64Payload = matches[2].replace(/\s/g, "");
+      const buffer = Buffer.from(base64Payload, "base64");
+      if (!buffer.length || buffer.toString("base64").replace(/=+$/, "") !== base64Payload.replace(/=+$/, "")) {
+        return res.status(400).json({ error: "INVALID_FILE_DATA", message: "بيانات الصورة غير مكتملة أو غير صالحة" });
       }
 
-      const finalFileName = `${cleanBaseName}_${Date.now()}_${randomSuffix}.${extension}`;
-      const filePath = path.join(uploadsDir, finalFileName);
+      const maxBytes = 8 * 1024 * 1024;
+      if (buffer.length > maxBytes) {
+        return res.status(413).json({ error: "FILE_TOO_LARGE", message: "الحد الأقصى لحجم الصورة هو 8 ميجابايت" });
+      }
 
-      await fs.promises.writeFile(filePath, buffer);
-      const publicUrl = `/uploads/${finalFileName}`;
-      console.log(`[Upload] Resilient file saved to: ${publicUrl} (${buffer.length} bytes)`);
+      const hasSignature = (
+        (mimeType === "image/jpeg" && buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) ||
+        (mimeType === "image/png" && buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) ||
+        (mimeType === "image/webp" && buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") ||
+        (mimeType === "image/gif" && buffer.length >= 6 && /^GIF8[79]a$/.test(buffer.toString("ascii", 0, 6)))
+      );
+      if (!hasSignature) {
+        return res.status(415).json({ error: "FILE_SIGNATURE_MISMATCH", message: "محتوى الملف لا يطابق نوع الصورة المعلن" });
+      }
 
-      return res.json({ success: true, url: publicUrl, size: buffer.length });
+      // Receipts may be attached by guests. Every other folder requires a verified Firebase identity.
+      const tokenSupplied = hasSuppliedAuthToken(req);
+      const decoded = await verifyAuthToken(req);
+      if (tokenSupplied && !decoded) {
+        return res.status(401).json({ error: "TOKEN_INVALID", message: "انتهت صلاحية الجلسة. يرجى تسجيل الدخول مجدداً." });
+      }
+
+      if (folder !== "receipts" && !decoded) {
+        return res.status(401).json({ error: "AUTH_REQUIRED", message: "يجب تسجيل الدخول قبل رفع هذا الملف" });
+      }
+
+      if (folder === "kyc") {
+        if (!decoded || !requestedName.startsWith(`${decoded.uid}_`)) {
+          return res.status(403).json({ error: "UPLOAD_FORBIDDEN", message: "لا يمكنك رفع مستندات تخص حساباً آخر" });
+        }
+      }
+
+      if (folder === "services" || folder === "posts") {
+        if (!decoded) {
+          return res.status(401).json({ error: "AUTH_REQUIRED", message: "تسجيل دخول الإدارة مطلوب" });
+        }
+        if (!isOwnerUser(decoded)) {
+          const firestore = getDb();
+          const [staffSnap, userSnap] = await Promise.all([
+            firestore.collection("staff").doc(decoded.uid).get(),
+            firestore.collection("users").doc(decoded.uid).get()
+          ]);
+          const staffRole = staffSnap.exists && staffSnap.data()?.active === true ? staffSnap.data()?.role : null;
+          const userData = userSnap.exists ? userSnap.data() : {};
+          const userRole = userData?.staffRole || userData?.role;
+          const allowedStaffRoles = folder === "services"
+            ? ["admin", "services_manager"]
+            : ["admin", "services_manager", "content_manager"];
+          if (!allowedStaffRoles.includes(staffRole) && userRole !== "admin" && userRole !== "services_manager") {
+            return res.status(403).json({ error: "UPLOAD_FORBIDDEN", message: "ليست لديك صلاحية رفع ملفات الإدارة" });
+          }
+        }
+      }
+
+      if (!adminApp || adminInitStatus !== "initialized") {
+        return res.status(503).json({ error: "STORAGE_BACKEND_UNAVAILABLE", message: "التخزين السحابي غير مهيأ على الخادم. يرجى المحاولة لاحقاً." });
+      }
+
+      const bucketName = firebaseConfig.storageBucket;
+      if (!bucketName) {
+        return res.status(503).json({ error: "STORAGE_BUCKET_NOT_CONFIGURED", message: "لم يتم ضبط حاوية تخزين Firebase لهذا المشروع" });
+      }
+
+      const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/png" ? "png" : mimeType === "image/gif" ? "gif" : "webp";
+      const requestedBase = requestedName.replace(/\.[^.]+$/, "");
+      const safeBase = requestedBase.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 100) || "image";
+      const randomSuffix = crypto.randomBytes(12).toString("hex");
+      const finalFileName = `${safeBase}_${Date.now()}_${randomSuffix}.${extension}`;
+      const objectPath = `${folder}/${finalFileName}`;
+      const downloadToken = crypto.randomUUID();
+      const bucket = getStorage(adminApp).bucket(bucketName);
+      const fileRef = bucket.file(objectPath);
+
+      await fileRef.save(buffer, {
+        resumable: false,
+        metadata: {
+          contentType: mimeType,
+          cacheControl: folder === "services" || folder === "posts" ? "public, max-age=31536000, immutable" : "private, no-store",
+          metadata: {
+            firebaseStorageDownloadTokens: downloadToken,
+            uploadedBy: decoded?.uid || "guest",
+            uploadedAt: new Date().toISOString()
+          }
+        }
+      });
+
+      const encodedObjectPath = encodeURIComponent(objectPath);
+      const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodedObjectPath}?alt=media&token=${downloadToken}`;
+      return res.json({ success: true, url: downloadUrl, size: buffer.length, storage: "firebase" });
     } catch (err: any) {
-      console.error("[Upload Error]:", err);
-      return res.status(500).json({ error: "UPLOAD_FAILED", message: err.message || "فشل حفظ الملف على الخادم" });
+      console.error("[Upload Error]:", err?.message || err);
+      if (err?.code === 7 || err?.code === 403 || err?.code === 404) {
+        return res.status(503).json({ error: "STORAGE_ACCESS_FAILED", message: "تعذر الوصول إلى حاوية التخزين. تحقق الإدارة من إعدادات Firebase Storage." });
+      }
+      return res.status(500).json({ error: "UPLOAD_FAILED", message: "فشل حفظ الصورة في التخزين السحابي" });
     }
   });
 
@@ -385,36 +455,25 @@ async function startServer() {
   // Maintenance Middleware for Order Endpoints (Resilient check with REST fallback)
   const checkMaintenance = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     try {
-      let isMaintenance = false;
-      try {
-        const firestore = getDb();
-        const settingsDoc = await firestore.collection("settings").doc("global").get();
-        if (settingsDoc.exists) {
-          isMaintenance = settingsDoc.data()?.maintenanceMode === true;
-        }
-      } catch (adminErr) {
-        // Fallback to REST check with API key
-        const globalData = await getDocRest("settings", "global");
-        if (globalData) {
-          isMaintenance = globalData.maintenanceMode === true;
-        }
-      }
+      const firestore = getDb();
+      const settingsDoc = await firestore.collection("settings").doc("global").get();
+      const isMaintenance = settingsDoc.exists && settingsDoc.data()?.maintenanceMode === true;
 
       if (isMaintenance) {
-        // Allow owner to bypass maintenance
         const decoded = await verifyAuthToken(req);
-        if (decoded && isOwnerUser(decoded)) {
-          return next();
-        }
+        if (decoded && isOwnerUser(decoded)) return next();
         return res.status(503).json({
           error: "MAINTENANCE_MODE",
           message: "المنصة قيد الصيانة المجدولة حالياً لتحسين الخدمات. لا يمكن قبول طلبات جديدة في الوقت الحالي."
         });
       }
       return next();
-    } catch (err) {
-      console.warn("[Maintenance Check] Pass-through on error:", err);
-      return next();
+    } catch (err: any) {
+      console.error("[Maintenance Check] Could not verify platform status:", err?.message || err);
+      return res.status(503).json({
+        error: "MAINTENANCE_STATUS_UNAVAILABLE",
+        message: "تعذر التحقق من حالة المنصة حالياً. لم يتم قبول الطلب، يرجى المحاولة لاحقاً."
+      });
     }
   };
 
@@ -442,6 +501,20 @@ async function startServer() {
       }
 
       const clientAttemptId = attemptId.trim();
+      if (!/^[A-Za-z0-9_-]{8,128}$/.test(clientAttemptId)) {
+        return res.status(400).json({ error: "ATTEMPT_ID_INVALID", message: "رمز المحاولة يحتوي على أحرف غير مسموح بها" });
+      }
+
+      let firestore: Firestore;
+      try {
+        firestore = getDb();
+      } catch (dbErr: any) {
+        console.error("[Order Creation] Admin Firestore is unavailable:", dbErr?.message || dbErr);
+        return res.status(503).json({
+          error: "ORDER_BACKEND_UNAVAILABLE",
+          message: "خدمة حفظ الطلبات غير جاهزة حالياً. لم يتم تسجيل طلبك، يرجى المحاولة لاحقاً."
+        });
+      }
 
       // Built-in catalog for standard services
       const defaultServices: Record<string, any> = {
@@ -496,13 +569,11 @@ async function startServer() {
       // 1. Fetch Trusted Service Configuration
       let serviceData: any = null;
       try {
-        const firestore = getDb();
         const serviceDoc = await firestore.collection("services").doc(serviceId).get();
-        if (serviceDoc.exists) {
-          serviceData = serviceDoc.data();
-        }
-      } catch {
-        serviceData = await getDocRest("services", serviceId);
+        if (serviceDoc.exists) serviceData = serviceDoc.data();
+      } catch (serviceErr: any) {
+        console.error("[Order Creation] Service lookup failed:", serviceErr?.message || serviceErr);
+        return res.status(503).json({ error: "SERVICE_LOOKUP_UNAVAILABLE", message: "تعذر التحقق من الخدمة حالياً. يرجى المحاولة لاحقاً." });
       }
 
       if (!serviceData && defaultServices[serviceId]) {
@@ -527,20 +598,19 @@ async function startServer() {
 
         let paymentMethods: any = null;
         try {
-          const firestore = getDb();
           const paymentSettingsDoc = await firestore.collection("settings").doc("payment_methods").get();
           paymentMethods = paymentSettingsDoc.exists ? paymentSettingsDoc.data()?.methods || paymentSettingsDoc.data() : null;
-        } catch {
-          const paymentData = await getDocRest("settings", "payment_methods");
-          paymentMethods = paymentData?.methods || paymentData;
+        } catch (paymentErr: any) {
+          console.error("[Order Creation] Payment settings lookup failed:", paymentErr?.message || paymentErr);
+          return res.status(503).json({ error: "PAYMENT_SETTINGS_UNAVAILABLE", message: "تعذر التحقق من طرق الدفع حالياً. لم يتم قبول الطلب." });
         }
 
+        // Match the application's configured defaults; never activate unknown wallets implicitly.
         if (!paymentMethods) {
           paymentMethods = {
             bankily: { enabled: true, labelAr: "بنكيلي", labelFr: "Bankily" },
             sadad: { enabled: true, labelAr: "سداد", labelFr: "Sedad" },
-            masrvi: { enabled: true, labelAr: "مصرفي", labelFr: "Masrvi" },
-            gazapay: { enabled: true, labelAr: "غزة باي", labelFr: "GazaPay" }
+            gaza: { enabled: false, labelAr: "غزة باي", labelFr: "GazaPay" }
           };
         }
 
@@ -558,50 +628,58 @@ async function startServer() {
         }
       }
 
-      // 3. Compute and Validate Server-Authoritative Price
+      // 3. Compute and Validate the amount using trusted server-side configuration only.
       let finalAmount = 0;
       if (!isQuoteMode) {
         const parsedClientAmount = Number(requestedAmount);
-        if (isNaN(parsedClientAmount) || parsedClientAmount <= 0) {
-          return res.status(400).json({ error: "INVALID_AMOUNT", message: "المبلغ المطلوب غير صالح" });
+        if (!Number.isSafeInteger(parsedClientAmount) || parsedClientAmount <= 0) {
+          return res.status(400).json({ error: "INVALID_AMOUNT", message: "المبلغ المطلوب يجب أن يكون رقماً صحيحاً موجباً بالأوقية MRU" });
         }
 
-        // Check package constraints
-        const combinedPackages = [
-          ...(Array.isArray(serviceData.packages) ? serviceData.packages : []),
-          ...(defaultServices[serviceId]?.packages || [])
-        ];
+        const configuredPackages = Array.isArray(serviceData.packages) && serviceData.packages.length > 0
+          ? serviceData.packages
+          : (defaultServices[serviceId]?.packages || []);
+        const hasCustomBounds = serviceData.minAmountMru !== undefined || serviceData.minAmount !== undefined ||
+          serviceData.maxAmountMru !== undefined || serviceData.maxAmount !== undefined;
 
-        if (combinedPackages.length > 0 && !serviceData.allowCustomAmount) {
-          const validPackage = combinedPackages.find((p: any) => Number(p.amount) === parsedClientAmount);
+        if (pricingMode === "range" || pricingMode === "custom" || serviceData.allowCustomAmount === true) {
+          const rawMin = serviceData.minAmountMru ?? serviceData.minAmount;
+          const rawMax = serviceData.maxAmountMru ?? serviceData.maxAmount;
+          const min = Number(rawMin);
+          const max = Number(rawMax);
+          if (!hasCustomBounds || !Number.isSafeInteger(min) || min <= 0 || !Number.isSafeInteger(max) || max < min) {
+            return res.status(409).json({ error: "SERVICE_PRICING_NOT_CONFIGURED", message: "نطاق سعر هذه الخدمة غير مكتمل. يرجى مراجعة الإدارة قبل الشراء." });
+          }
+          if (parsedClientAmount < min || parsedClientAmount > max) {
+            return res.status(400).json({
+              error: "AMOUNT_OUT_OF_RANGE",
+              message: `المبلغ يجب أن يكون بين ${min} و ${max} MRU`
+            });
+          }
+          finalAmount = parsedClientAmount;
+        } else if (configuredPackages.length > 0) {
+          const validPackage = configuredPackages.find((p: any) => Number(p.amount) === parsedClientAmount);
           if (!validPackage) {
-            return res.status(400).json({ 
-              error: "INVALID_PACKAGE_PRICE", 
-              message: `المبلغ المطلوب (${parsedClientAmount} MRU) لا يتطابق مع أي من باقات الخدمة المتاحة.` 
+            return res.status(400).json({
+              error: "INVALID_PACKAGE_PRICE",
+              message: `المبلغ المطلوب (${parsedClientAmount} MRU) لا يتطابق مع باقات الخدمة الحالية.`
             });
           }
           finalAmount = parsedClientAmount;
         } else if (pricingMode === "fixed") {
-          const expectedPrice = Number(serviceData.priceMru || serviceData.suggestedPrice || serviceData.price || 0);
-          if (expectedPrice > 0 && parsedClientAmount !== expectedPrice) {
+          const expectedPrice = Number(serviceData.priceMru ?? serviceData.suggestedPrice ?? serviceData.price ?? 0);
+          if (!Number.isSafeInteger(expectedPrice) || expectedPrice <= 0) {
+            return res.status(409).json({ error: "SERVICE_PRICE_NOT_CONFIGURED", message: "لم يتم ضبط سعر صالح لهذه الخدمة. يرجى مراجعة الإدارة." });
+          }
+          if (parsedClientAmount !== expectedPrice) {
             return res.status(400).json({ error: "PRICE_MISMATCH", message: `سعر الخدمة الرسمي هو ${expectedPrice} MRU` });
           }
-          finalAmount = expectedPrice > 0 ? expectedPrice : parsedClientAmount;
-        } else if (pricingMode === "range") {
-          const min = Number(serviceData.minAmountMru || serviceData.minAmount || 0);
-          const max = Number(serviceData.maxAmountMru || serviceData.maxAmount || Infinity);
-          if (parsedClientAmount < min || parsedClientAmount > max) {
-            return res.status(400).json({ 
-              error: "AMOUNT_OUT_OF_RANGE", 
-              message: `المبلغ يجب أن يكون بين ${min} و ${max} MRU` 
-            });
-          }
-          finalAmount = parsedClientAmount;
+          finalAmount = expectedPrice;
         } else {
-          finalAmount = parsedClientAmount;
+          return res.status(409).json({ error: "UNSUPPORTED_PRICING_MODE", message: "طريقة تسعير هذه الخدمة غير مهيأة بشكل آمن. يرجى مراجعة الإدارة." });
         }
 
-        // Validate Receipt Proof for paid orders (Strict: no fake tokens or empty values)
+        // Paid orders must reference a completed Firebase Storage receipt upload.
         if (!proofImageUrl || typeof proofImageUrl !== "string" || proofImageUrl.trim() === "" || proofImageUrl === "receipt_attached") {
           return res.status(400).json({
             error: "RECEIPT_REQUIRED",
@@ -609,11 +687,22 @@ async function startServer() {
           });
         }
 
-        const cleanProofUrl = proofImageUrl.trim();
-        if (!cleanProofUrl.startsWith("http") && !cleanProofUrl.startsWith("/uploads/")) {
+        try {
+          const receiptUrl = new URL(proofImageUrl.trim());
+          const bucketPrefix = `/v0/b/${firebaseConfig.storageBucket}/o/`;
+          const objectName = receiptUrl.pathname.startsWith(bucketPrefix)
+            ? decodeURIComponent(receiptUrl.pathname.slice(bucketPrefix.length))
+            : "";
+          if (receiptUrl.origin !== "https://firebasestorage.googleapis.com" ||
+              !objectName.startsWith("receipts/") ||
+              receiptUrl.searchParams.get("alt") !== "media" ||
+              !receiptUrl.searchParams.get("token")) {
+            throw new Error("INVALID_RECEIPT_URL");
+          }
+        } catch {
           return res.status(400).json({
             error: "INVALID_RECEIPT_URL",
-            message: "رابط إيصال الدفع غير صالح. يرجى إعادة رفع إيصال الدفع."
+            message: "رابط إيصال الدفع غير صالح أو لا يشير إلى تخزين Firebase المعتمد. يرجى إعادة رفع الإيصال."
           });
         }
       }
@@ -655,13 +744,13 @@ async function startServer() {
       // Verify not blocked if authenticated
       if (decodedUser) {
         try {
-          const firestore = getDb();
           const userDoc = await firestore.collection("users").doc(decodedUser.uid).get();
           if (userDoc.exists && userDoc.data()?.blocked === true) {
             return res.status(403).json({ error: "USER_BLOCKED", message: "حسابك محظور من إجراء طلبات جديدة" });
           }
-        } catch (authDocErr) {
-          console.warn("[Order Creation] User check notice:", authDocErr);
+        } catch (authDocErr: any) {
+          console.error("[Order Creation] Could not verify user status:", authDocErr?.message || authDocErr);
+          return res.status(503).json({ error: "USER_STATUS_UNAVAILABLE", message: "تعذر التحقق من حالة الحساب. لم يتم قبول الطلب." });
         }
       }
 
@@ -670,7 +759,6 @@ async function startServer() {
         const cleanPhone = String(senderPhone).replace(/[^0-9]/g, '');
         if (cleanPhone.length >= 8) {
           try {
-            const firestore = getDb();
             const blockedPhoneSnap = await firestore.collection("users")
               .where("phoneNumber", "==", cleanPhone)
               .where("blocked", "==", true)
@@ -679,8 +767,9 @@ async function startServer() {
             if (!blockedPhoneSnap.empty) {
               return res.status(403).json({ error: "PHONE_BLOCKED", message: "هذا الرقم محظور من إجراء طلبات جديدة" });
             }
-          } catch (phoneErr) {
-            console.warn("[Order Creation] Phone check notice:", phoneErr);
+          } catch (phoneErr: any) {
+            console.error("[Order Creation] Could not verify sender phone status:", phoneErr?.message || phoneErr);
+            return res.status(503).json({ error: "PHONE_STATUS_UNAVAILABLE", message: "تعذر التحقق من رقم المرسل. لم يتم قبول الطلب." });
           }
         }
       }
@@ -690,7 +779,6 @@ async function startServer() {
       const recipientId = safeFields.playerId || safeFields.email || safeFields.phone || safeFields.cardId || safeFields.username || senderPhone;
       if (recipientId && effectiveUserId) {
         try {
-          const firestore = getDb();
           const activeOrdersQuery = await firestore.collection("orders")
             .where("serviceId", "==", serviceId)
             .where("status", "==", "pending")
@@ -711,8 +799,9 @@ async function startServer() {
               message: "يوجد طلب نشط قيد التنفيذ حالياً لنفس الحساب أو المستلم. يرجى الانتظار حتى اكتمال معالجة الطلب السابق."
             });
           }
-        } catch (activeErr) {
-          console.warn("[Order Creation] Active orders check warning:", activeErr);
+        } catch (activeErr: any) {
+          console.error("[Order Creation] Active order check failed:", activeErr?.message || activeErr);
+          return res.status(503).json({ error: "ACTIVE_ORDER_CHECK_UNAVAILABLE", message: "تعذر التحقق من الطلبات النشطة. لم يتم قبول الطلب لتجنب التكرار." });
         }
       }
 
@@ -731,16 +820,14 @@ async function startServer() {
       const trackingToken = crypto.randomBytes(24).toString("hex");
       const trackingTokenHash = crypto.createHash("sha256").update(trackingToken).digest("hex");
 
-      // 7. Atomic Idempotency Check & Order Insertion
+      // 7. Atomic Idempotency Check & Order Insertion (Admin SDK only).
+      // Never fall back to client-rule REST writes: they are not atomic and can duplicate orders.
       let orderId = "";
       let trackingTokenResult: string | null = null;
       let isReplay = false;
-      let adminSucceeded = false;
 
       try {
-        const firestore = getDb();
         const idempotencyRef = firestore.collection("order_idempotency").doc(clientAttemptId);
-        
         const transactionResult = await firestore.runTransaction(async (transaction) => {
           const idempSnap = await transaction.get(idempotencyRef);
 
@@ -805,74 +892,18 @@ async function startServer() {
         orderId = transactionResult.orderId;
         trackingTokenResult = transactionResult.trackingToken;
         isReplay = transactionResult.isReplay;
-        adminSucceeded = true;
       } catch (txErr: any) {
         if (txErr.message === "IDEMPOTENCY_PAYLOAD_MISMATCH") {
-          return res.status(409).json({ 
-            error: "IDEMPOTENCY_CONFLICT", 
-            message: "رمز المحاولة هذا تم استخدامه مسبقاً ببيانات مختلفة. يرجى تحديث الصفحة وإعادة المحاولة." 
+          return res.status(409).json({
+            error: "IDEMPOTENCY_CONFLICT",
+            message: "رمز المحاولة هذا تم استخدامه مسبقاً ببيانات مختلفة. يرجى تحديث الصفحة وإعادة المحاولة."
           });
         }
-        console.warn("[Admin Order Notice] Transaction unavailable, executing via REST fallback:", txErr?.message || txErr);
-      }
-
-      // Seamless REST Fallback when admin service account is unprovisioned
-      if (!adminSucceeded) {
-        const existingIdemp = await getDocRest("order_idempotency", clientAttemptId);
-        if (existingIdemp) {
-          if (existingIdemp.payloadHash !== payloadHash) {
-            return res.status(409).json({
-              error: "IDEMPOTENCY_CONFLICT",
-              message: "رمز المحاولة هذا تم استخدامه مسبقاً ببيانات مختلفة. يرجى تحديث الصفحة وإعادة المحاولة."
-            });
-          }
-          orderId = existingIdemp.orderId;
-          trackingTokenResult = existingIdemp.trackingToken || null;
-          isReplay = true;
-        } else {
-          orderId = 'ord_' + Date.now().toString(36) + '_' + crypto.randomBytes(6).toString("hex");
-          const orderDocData = {
-            id: orderId,
-            userId: effectiveUserId,
-            isGuest: isGuest,
-            userName: effectiveUserName,
-            userEmail: effectiveUserEmail,
-            serviceId: serviceId,
-            serviceName: serviceData.nameAr || serviceData.name || "خدمة رقمية",
-            serviceType: serviceData.nameAr || serviceData.name || "خدمة رقمية",
-            amount: finalAmount,
-            total: finalAmount,
-            fee: 0,
-            status: "pending",
-            fields: safeFields,
-            paymentMethod: trustedPaymentMethod,
-            senderPhone: isQuoteMode ? "" : (senderPhone ? String(senderPhone).trim() : ""),
-            proofImageUrl: proofImageUrl || "",
-            proofUrl: proofImageUrl || "",
-            attemptId: clientAttemptId,
-            trackingToken: isGuest ? trackingToken : null,
-            trackingTokenHash: isGuest ? trackingTokenHash : null,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          };
-
-          const orderSaved = await setDocRest("orders", orderId, orderDocData);
-          if (!orderSaved) {
-            throw new Error("فشل حفظ الطلب في قاعدة البيانات السحابية");
-          }
-
-          await setDocRest("order_idempotency", clientAttemptId, {
-            attemptId: clientAttemptId,
-            orderId: orderId,
-            payloadHash: payloadHash,
-            trackingToken: isGuest ? trackingToken : null,
-            trackingTokenHash: isGuest ? trackingTokenHash : null,
-            createdAt: new Date().toISOString()
-          });
-
-          trackingTokenResult = isGuest ? trackingToken : null;
-          isReplay = false;
-        }
+        console.error("[Order Creation] Atomic Firestore transaction failed:", txErr?.message || txErr);
+        return res.status(503).json({
+          error: "ORDER_SAVE_UNAVAILABLE",
+          message: "تعذر تأكيد حفظ الطلب في قاعدة البيانات. لم يتم اعتبار الطلب ناجحاً؛ يمكنك إعادة المحاولة بنفس الصفحة."
+        });
       }
 
       return res.status(200).json({
