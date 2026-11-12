@@ -248,7 +248,7 @@ export default function ServiceGrid({ services, loading }: Props) {
                   >
                     <ServiceCard
                       service={service}
-                      priority={idx < 4}
+                      priority={idx < 2}
                       badge={idx % 5 === 0 ? (language === "ar" ? "عرض خاص" : "Promo") : undefined}
                     />
                   </motion.div>
