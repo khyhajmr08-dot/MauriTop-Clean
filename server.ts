@@ -563,6 +563,122 @@ async function startServer() {
     }
   });
 
+  // KYC review is performed by trusted server transactions; users and staff cannot self-verify accounts.
+  app.post("/api/admin/kyc/:userId/status", async (req, res) => {
+    try {
+      const decoded = await verifyAuthToken(req);
+      if (!decoded) {
+        return res.status(401).json({ error: "UNAUTHORIZED", message: "تسجيل الدخول الإداري مطلوب" });
+      }
+
+      const firestore = getDb();
+      if (!isOwnerUser(decoded)) {
+        const [staffSnap, userRoleSnap] = await Promise.all([
+          firestore.collection("staff").doc(decoded.uid).get(),
+          firestore.collection("users").doc(decoded.uid).get()
+        ]);
+        const staffRole = staffSnap.exists && staffSnap.data()?.active === true ? staffSnap.data()?.role : null;
+        const userRole = userRoleSnap.exists ? userRoleSnap.data()?.role : null;
+        if (!["orders_manager", "admin"].includes(staffRole) && userRole !== "admin") {
+          return res.status(403).json({ error: "FORBIDDEN", message: "ليست لديك صلاحية مراجعة طلبات التوثيق" });
+        }
+      }
+
+      const targetStatus = String(req.body?.status || "").toLowerCase();
+      const reason = String(req.body?.reason || "").trim();
+      if (!["approved", "rejected"].includes(targetStatus)) {
+        return res.status(400).json({ error: "INVALID_KYC_STATUS", message: "حالة التوثيق المطلوبة غير صالحة" });
+      }
+      if (targetStatus === "rejected" && !reason) {
+        return res.status(400).json({ error: "KYC_REJECTION_REASON_REQUIRED", message: "سبب رفض التوثيق إلزامي" });
+      }
+
+      const targetUid = String(req.params.userId || "");
+      if (!/^[A-Za-z0-9_-]{8,128}$/.test(targetUid)) {
+        return res.status(400).json({ error: "INVALID_USER_ID", message: "معرف المستخدم غير صالح" });
+      }
+
+      const userRef = firestore.collection("users").doc(targetUid);
+      const requestRef = firestore.collection("kyc_requests").doc(targetUid);
+      const reviewerIdentifier = decoded.email || decoded.uid;
+      const reviewerName = decoded.name || decoded.email?.split("@")[0] || "إدارة MAURITOP";
+      const now = admin.firestore.FieldValue.serverTimestamp();
+
+      await firestore.runTransaction(async (transaction) => {
+        const [userSnap, requestSnap] = await Promise.all([
+          transaction.get(userRef),
+          transaction.get(requestRef)
+        ]);
+        if (!userSnap.exists) throw new Error("KYC_USER_NOT_FOUND");
+
+        const userData = userSnap.data() || {};
+        const hasSubmission = Boolean(userData.kyc_submitted_at || requestSnap.exists);
+        if (!hasSubmission) throw new Error("KYC_SUBMISSION_NOT_FOUND");
+
+        const approved = targetStatus === "approved";
+        const reviewStatus = approved ? "Active" : "Rejected";
+        const userUpdates: Record<string, any> = {
+          reviewStatus,
+          isVerified: approved,
+          kyc_completed: approved,
+          reviewedBy: reviewerIdentifier,
+          reviewedByName: reviewerName,
+          reviewedAt: now,
+          updatedAt: now,
+          blockReason: approved ? "" : reason
+        };
+        if (approved) userUpdates.verifiedAt = now;
+
+        transaction.update(userRef, userUpdates);
+        transaction.set(requestRef, {
+          userId: targetUid,
+          reviewStatus: targetStatus === "approved" ? "approved" : "rejected",
+          isVerified: approved,
+          kyc_completed: approved,
+          reviewedBy: reviewerIdentifier,
+          reviewedByName: reviewerName,
+          reviewedAt: now,
+          blockReason: approved ? "" : reason,
+          updatedAt: now
+        }, { merge: true });
+
+        const notificationRef = firestore.collection("notifications").doc();
+        transaction.set(notificationRef, {
+          userId: targetUid,
+          title: approved ? "تهانينا! تم توثيق حسابك بنجاح" : "تنبيه بخصوص طلب توثيق الحساب",
+          body: approved
+            ? "قامت إدارة منصة موري توب بمراجعة وثائق الهوية وتوثيق حسابك رسمياً."
+            : `تعذر قبول طلب التوثيق بالبيانات الحالية. السبب: ${reason}. يرجى مراجعة الطلب وإعادة رفع وثيقة واضحة.`,
+          read: false,
+          type: approved ? "success" : "error",
+          createdAt: now
+        });
+
+        const auditRef = firestore.collection("audit_logs").doc();
+        transaction.set(auditRef, {
+          action: approved ? "KYC_APPROVED" : "KYC_REJECTED",
+          targetUserId: targetUid,
+          targetUserEmail: userData.email || "",
+          reason: approved ? "" : reason,
+          performedBy: reviewerIdentifier,
+          performedByName: reviewerName,
+          timestamp: now
+        });
+      });
+
+      return res.json({ success: true, status: targetStatus });
+    } catch (err: any) {
+      if (err.message === "KYC_USER_NOT_FOUND") {
+        return res.status(404).json({ error: err.message, message: "ملف المستخدم غير موجود" });
+      }
+      if (err.message === "KYC_SUBMISSION_NOT_FOUND") {
+        return res.status(409).json({ error: err.message, message: "لا يوجد طلب توثيق مُرسل لهذا المستخدم" });
+      }
+      console.error("[KYC Review Error]:", err?.message || err);
+      return res.status(503).json({ error: "KYC_REVIEW_UNAVAILABLE", message: "تعذرت معالجة طلب التوثيق حالياً. لم يتم تأكيد أي تغيير." });
+    }
+  });
+
   // Owner-only withdrawal approval/rejection. Rejections refund the held balance exactly once.
   app.post("/api/admin/withdrawals/:withdrawalId/status", async (req, res) => {
     try {
