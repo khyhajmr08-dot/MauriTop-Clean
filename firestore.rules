@@ -54,12 +54,33 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
       allow list: if isAdmin();
-      allow create: if isSignedIn() && request.auth.uid == userId;
-      // Allow users to update their own profile, but prevent unauthorized role elevation
-      allow update: if isOwner() || (
-        isSignedIn() && 
+      // A normal account may create only its own unprivileged default profile.
+      // The project owner is resolved independently by UID/email and may keep the owner profile role.
+      allow create: if isOwner() || (
+        isSignedIn() &&
         request.auth.uid == userId &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'staffRole', 'referralsCount', 'referralEarnings', 'isReferralRewarded', 'balance'])
+        request.resource.data.role == 'user' &&
+        request.resource.data.blocked == false &&
+        request.resource.data.isVerified == false &&
+        request.resource.data.referralsCount == 0 &&
+        request.resource.data.referralEarnings == 0 &&
+        request.resource.data.loyaltyPoints == 0 &&
+        !('staffRole' in request.resource.data) &&
+        !('balance' in request.resource.data) &&
+        !('isReferralRewarded' in request.resource.data) &&
+        !('referredBy' in request.resource.data)
+      );
+
+      // Users may edit ordinary profile details only; privilege, verification and money fields are server/admin controlled.
+      allow update: if isOwner() || (
+        isSignedIn() &&
+        request.auth.uid == userId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'role', 'staffRole', 'blocked', 'isVerified', 'reviewStatus',
+          'referralsCount', 'referralEarnings', 'isReferralRewarded',
+          'firstCompletedOrderAt', 'balance', 'loyaltyPoints', 'referredBy',
+          'phoneStatus', 'phoneRejectReason'
+        ])
       );
       allow delete: if isOwner();
     }
