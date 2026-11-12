@@ -1284,6 +1284,15 @@ async function startServer() {
       });
       const payloadHash = crypto.createHash("sha256").update(payloadString).digest("hex");
 
+      // Deterministic server-side lock prevents two distinct attempt IDs from creating
+      // concurrent pending orders for the same account, service and recipient.
+      const activeOrderLockId = recipientId
+        ? crypto.createHash("sha256").update(JSON.stringify([effectiveUserId, serviceId, String(recipientId)])).digest("hex")
+        : null;
+      const activeOrderLockRef = activeOrderLockId
+        ? firestore.collection("order_active_locks").doc(activeOrderLockId)
+        : null;
+
       // Stable cryptographic tracking token and secure hash for guest orders
       const trackingToken = crypto.randomBytes(24).toString("hex");
       const trackingTokenHash = crypto.createHash("sha256").update(trackingToken).digest("hex");
@@ -1309,6 +1318,13 @@ async function startServer() {
               orderId: prev.orderId,
               trackingToken: prev.trackingToken || null
             };
+          }
+
+          const activeLockSnap = activeOrderLockRef
+            ? await transaction.get(activeOrderLockRef)
+            : null;
+          if (activeLockSnap?.exists) {
+            throw new Error("DUPLICATE_ACTIVE_ORDER");
           }
 
           const newOrderRef = firestore.collection("orders").doc();
@@ -1350,6 +1366,17 @@ async function startServer() {
             createdAt: admin.firestore.FieldValue.serverTimestamp()
           });
 
+          if (activeOrderLockRef) {
+            transaction.set(activeOrderLockRef, {
+              userId: effectiveUserId,
+              serviceId,
+              recipientId: String(recipientId),
+              orderId: newOrderId,
+              status: "pending",
+              createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
+
           return {
             isReplay: false,
             orderId: newOrderId,
@@ -1365,6 +1392,12 @@ async function startServer() {
           return res.status(409).json({
             error: "IDEMPOTENCY_CONFLICT",
             message: "رمز المحاولة هذا تم استخدامه مسبقاً ببيانات مختلفة. يرجى تحديث الصفحة وإعادة المحاولة."
+          });
+        }
+        if (txErr.message === "DUPLICATE_ACTIVE_ORDER") {
+          return res.status(409).json({
+            error: "DUPLICATE_ACTIVE_ORDER",
+            message: "يوجد طلب نشط قيد التنفيذ لنفس الحساب والخدمة والمستلم. انتظر انتهاء معالجته قبل إنشاء طلب جديد."
           });
         }
         console.error("[Order Creation] Atomic Firestore transaction failed:", txErr?.message || txErr);
