@@ -623,7 +623,7 @@ async function startServer() {
           fullName.split(/\s+/).filter(Boolean).length < 2 ||
           phoneDigits.length < 8 ||
           !idNumber ||
-          !["national_id", "passport", "residence_card"].includes(idType) ||
+          !["national_id", "passport"].includes(idType) ||
           !city ||
           !address ||
           !userData.kyc_submitted_at ||
