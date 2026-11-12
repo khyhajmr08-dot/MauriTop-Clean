@@ -632,7 +632,8 @@ async function startServer() {
         transaction.update(userRef, userUpdates);
         transaction.set(requestRef, {
           userId: targetUid,
-          reviewStatus: targetStatus === "approved" ? "approved" : "rejected",
+          reviewStatus: approved ? "Active" : "Rejected",
+          status: targetStatus,
           isVerified: approved,
           kyc_completed: approved,
           reviewedBy: reviewerIdentifier,
