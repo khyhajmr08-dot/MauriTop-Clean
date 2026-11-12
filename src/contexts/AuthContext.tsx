@@ -149,7 +149,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 loyaltyPoints: 0,
                 isReferralRewarded: false,
                 referredBy: initialReferrerId,
-                reviewStatus: 'Active',
+                reviewStatus: 'Not Verified',
                 isVerified: false,
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
