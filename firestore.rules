@@ -84,7 +84,8 @@ service cloud.firestore {
           'role', 'staffRole', 'blocked', 'isVerified',
           'referralsCount', 'referralEarnings', 'isReferralRewarded',
           'firstCompletedOrderAt', 'balance', 'loyaltyPoints', 'referredBy',
-          'phoneStatus', 'phoneRejectReason'
+          'phoneStatus', 'phoneRejectReason', 'reviewedBy', 'reviewedByName',
+          'reviewedAt', 'verifiedAt', 'blockReason'
         ]) &&
         (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['reviewStatus']) ||
           request.resource.data.reviewStatus == 'Under Review') &&
