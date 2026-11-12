@@ -6,6 +6,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
+import { getAuth } from "firebase-admin/auth";
 import { initializeApp, applicationDefault, getApps, App } from "firebase-admin/app";
 import * as admin from "firebase-admin";
 import crypto from "crypto";
@@ -215,8 +216,10 @@ async function startServer() {
     next();
   });
 
-  app.use(express.json({ limit: "20mb" }));
-  app.use(express.urlencoded({ extended: true, limit: "20mb" }));
+  // Vercel Functions cap request bodies at 4.5 MB. Large files upload directly to
+  // Firebase Storage; this JSON/data-URL endpoint is only a small-file fallback.
+  app.use(express.json({ limit: "4mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
   // Durable upload endpoint: always writes to the configured Firebase Storage bucket.
   // The local filesystem is intentionally not used because serverless instances are ephemeral.
@@ -254,9 +257,9 @@ async function startServer() {
         return res.status(400).json({ error: "INVALID_FILE_DATA", message: "بيانات الصورة غير مكتملة أو غير صالحة" });
       }
 
-      const maxBytes = 8 * 1024 * 1024;
+      const maxBytes = Math.floor(2.8 * 1024 * 1024);
       if (buffer.length > maxBytes) {
-        return res.status(413).json({ error: "FILE_TOO_LARGE", message: "الحد الأقصى لحجم الصورة هو 8 ميجابايت" });
+        return res.status(413).json({ error: "FILE_TOO_LARGE", message: "تعذر الرفع الاحتياطي لأن حجم الصورة يتجاوز الحد الآمن. أعد المحاولة عبر اتصال Firebase المباشر أو اختر صورة أصغر من 2.8 ميجابايت." });
       }
 
       const hasSignature = (
@@ -1789,7 +1792,18 @@ async function startServer() {
       }
 
       const firestore = getDb();
+      if (!adminApp || adminInitStatus !== "initialized") {
+        return res.status(503).json({ error: "AUTH_ADMIN_UNAVAILABLE", message: "خدمة إدارة صلاحيات الحسابات غير مهيأة حالياً." });
+      }
+
       const staffRef = firestore.collection("staff").doc(targetUid);
+      const previousStaffSnap = await staffRef.get();
+      const previousStaff = previousStaffSnap.exists ? previousStaffSnap.data() || {} : {};
+      const nextRole = role !== undefined ? role : previousStaff.role;
+      const nextActive = active !== undefined
+        ? Boolean(active)
+        : (previousStaffSnap.exists && previousStaff.active === true);
+
       const updateData: any = {
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedBy: decoded.email || decoded.uid
@@ -1800,7 +1814,8 @@ async function startServer() {
 
       await staffRef.set(updateData, { merge: true });
 
-      // Sync role into users document
+      // Sync role into the user profile and Firebase Auth custom claims.
+      // Storage Security Rules can then authorize staff uploads without querying a Firestore database.
       if (role !== undefined) {
         await firestore.collection("users").doc(targetUid).set({
           role: role === 'admin' ? 'admin' : (role === 'user' ? 'user' : 'staff'),
@@ -1808,6 +1823,20 @@ async function startServer() {
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
       }
+
+      const targetAuthUser = await getAuth(adminApp).getUser(targetUid);
+      const nextClaims: Record<string, any> = { ...(targetAuthUser.customClaims || {}) };
+      delete nextClaims.staffRole;
+      delete nextClaims.staffActive;
+      delete nextClaims.role;
+
+      if (nextRole === "admin") {
+        nextClaims.role = "admin";
+      } else if (nextRole && nextRole !== "user" && nextActive) {
+        nextClaims.staffRole = nextRole;
+        nextClaims.staffActive = true;
+      }
+      await getAuth(adminApp).setCustomUserClaims(targetUid, nextClaims);
 
       // Append-only audit record
       await firestore.collection("audit_logs").add({
