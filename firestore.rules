@@ -124,8 +124,8 @@ service cloud.firestore {
       // This prevents client-side price tampering and bypassing atomic idempotency checks.
       allow create: if false;
 
-      // Orders managers and owner can update status/notes
-      allow update: if isOwner() || hasStaffRole('orders_manager') || isUserRole('orders_manager') || isUserRole('admin');
+      // Order updates and status transitions are server-only; Admin SDK writes bypass Firestore rules.
+      allow update: if false;
       // ONLY the Owner can permanently delete order history
       allow delete: if isOwner();
     }
