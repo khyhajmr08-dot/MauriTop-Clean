@@ -103,15 +103,8 @@ export default function ServicesSection() {
           } as Service;
         });
 
-        // Local styling normalization
-        docs = docs.map(d => {
-          const targetSubKeys = ['tod', 'shahid', 'netflix', 'spotify', 'disney', 'osn', 'bein', 'youtube', 'shahid-vip', 'tod-vip', 'pubg', 'freefire', 'cod-mobile', 'mobilelegends', 'fifa'];
-          const isSubscriptionOrGame = targetSubKeys.some(key => d.id.toLowerCase().includes(key)) || (d.category === 'اشتراكات رقمية' || d.category === 'ألعاب' || d.category === 'اشتراكات');
-          if (isSubscriptionOrGame) {
-            return { ...d, imageFit: 'cover', imagePadding: 0 };
-          }
-          return d;
-        });
+        // Preserve the imageFit/imagePadding selected by the administrator.
+        // Missing settings are left unset so the card's service-specific safe defaults apply.
 
         setDbServices(docs);
         cacheService.set("db_services", docs);
