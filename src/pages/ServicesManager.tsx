@@ -10,6 +10,7 @@ import {
   serverTimestamp,
   setDoc,
   getDocs,
+  getDoc,
   deleteDoc,
   writeBatch,
   onSnapshot,
@@ -46,7 +47,7 @@ import {
   ExternalLink,
   Smartphone
 } from "lucide-react";
-import { cn, compressImage, formatMRU } from "../lib/utils";
+import { cn, formatMRU } from "../lib/utils";
 import type { Service } from "../types";
 import { useToast } from "../contexts/ToastContext";
 import { getFallbackServiceImage, resolveServiceImage } from "../lib/serviceImages";
@@ -323,26 +324,31 @@ export default function ServicesManager() {
 
   const handleImageUpload = async (blob: Blob) => {
     try {
+      if (!blob || blob.size <= 0 || blob.size > 8 * 1024 * 1024) {
+        throw new Error("يجب أن يكون حجم الصورة أكبر من صفر وأقل من 8 ميجابايت");
+      }
       setUploadProgress(10);
-      
+
+      // Keep the full cropped source quality. Preview resizing is handled only by the uploader UI.
       const rawBase64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = (e) => resolve(e.target?.result as string);
-        reader.onerror = () => reject(new Error("File read error"));
+        reader.onload = (e) => {
+          const result = e.target?.result;
+          if (typeof result === "string" && result.startsWith("data:image/")) resolve(result);
+          else reject(new Error("تعذر قراءة الصورة المحددة"));
+        };
+        reader.onerror = () => reject(new Error("فشل قراءة ملف الصورة"));
         reader.readAsDataURL(blob);
       });
-      
-      setUploadProgress(40);
-      const compressedBase64 = await compressImage(rawBase64, 600, 600, 0.7);
-      
-      setFormData(prev => ({ ...prev, imageUrl: compressedBase64, image: compressedBase64 }));
+
+      setUploadProgress(80);
+      setFormData(prev => ({ ...prev, imageUrl: rawBase64, image: rawBase64 }));
       setUploadProgress(100);
-      showToast("تم اختيار الصورة وتحسينها بنجاح (اضغط حفظ التغييرات)", "success");
-      
-      setTimeout(() => setUploadProgress(0), 400);
+      showToast("تم اختيار الصورة الأصلية المقصوصة. اضغط حفظ التغييرات لرفعها سحابياً.", "success");
+      window.setTimeout(() => setUploadProgress(0), 400);
     } catch (err: any) {
       console.error("Image upload error:", err);
-      showToast("فشل معالجة الصورة: " + (err as Error).message, "error");
+      showToast("فشل تجهيز الصورة: " + (err as Error).message, "error");
       setUploadProgress(0);
     }
   };
@@ -362,10 +368,9 @@ export default function ServicesManager() {
       if (finalImageUrl && (finalImageUrl.startsWith("data:") || finalImageUrl.startsWith("blob:"))) {
         try {
           setUploadProgress(15);
-          const compressedBase64 = await compressImage(finalImageUrl, 800, 800, 0.75);
           const imageId = selectedService?.id || id;
-          
-          const uploadedUrl = await uploadServiceImage(compressedBase64, imageId, (percent) => {
+
+          const uploadedUrl = await uploadServiceImage(finalImageUrl, imageId, (percent) => {
             setUploadProgress(percent);
           });
 
@@ -423,8 +428,19 @@ export default function ServicesManager() {
         }
       });
 
-      await setDoc(doc(db, "services", id), cleanData, { merge: true });
-      
+      const serviceRef = doc(db, "services", id);
+      await setDoc(serviceRef, cleanData, { merge: true });
+
+      // Read-after-write check: don't report success until Firestore returns the saved image URL.
+      const savedService = await getDoc(serviceRef);
+      if (!savedService.exists()) {
+        throw new Error("تم إرسال الحفظ لكن تعذر التحقق من وجود سجل الخدمة في Firestore");
+      }
+      const savedImageUrl = savedService.data()?.imageUrl || savedService.data()?.image || "";
+      if (finalImageUrl && savedImageUrl !== finalImageUrl) {
+        throw new Error("لم تتطابق صورة الخدمة المحفوظة مع الصورة المرسلة. لم يتم تأكيد الحفظ.");
+      }
+
       setDbServices(prev => {
         const existingIndex = prev.findIndex(s => s.id === id);
         if (existingIndex >= 0) {
@@ -1321,13 +1337,13 @@ export default function ServicesManager() {
                   <div className="space-y-5">
                     <ImageUploader
                       onFileSelected={handleImageUpload}
-                      onImageSelected={(base64) =>
-                        setFormData((prev) => ({
-                          ...prev,
-                          imageUrl: base64,
-                          image: base64,
-                        }))
-                      }
+                      onImageSelected={(base64) => {
+                        // The cropped Blob is stored by onFileSelected at full quality.
+                        // This callback is retained only for the remove-image action.
+                        if (!base64) {
+                          setFormData((prev) => ({ ...prev, imageUrl: "", image: "" }));
+                        }
+                      }}
                       initialPreview={formData.imageUrl || formData.image}
                       label="تحميل صورة الخدمة المربعة"
                       imageFit={formData.imageFit}
