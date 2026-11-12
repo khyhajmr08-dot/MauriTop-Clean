@@ -74,9 +74,23 @@ async function uploadToServerApi(
   onProgress?: (percent: number) => void
 ): Promise<string> {
   onProgress?.(25);
-  let dataUrl: string = '';
-  if (typeof file === 'string') {
+
+  // Base64 adds roughly one third to the payload. Keep this JSON fallback below
+  // Vercel's 4.5 MB function request-body ceiling; normal uploads use Firebase directly.
+  const maxFallbackBytes = Math.floor(2.8 * 1024 * 1024);
+  if (typeof file !== "string" && file.size > maxFallbackBytes) {
+    throw new Error("تعذر استخدام مسار الرفع الاحتياطي لهذا الحجم. أعد المحاولة عبر Firebase Storage أو اختر صورة أصغر من 2.8 ميجابايت.");
+  }
+
+  let dataUrl: string = "";
+  if (typeof file === "string") {
     dataUrl = file;
+    const commaIndex = dataUrl.indexOf(",");
+    const encodedLength = commaIndex >= 0 ? dataUrl.slice(commaIndex + 1).replace(/\\s/g, "").length : 0;
+    const estimatedBytes = Math.floor(encodedLength * 3 / 4);
+    if (estimatedBytes > maxFallbackBytes) {
+      throw new Error("حجم الملف يتجاوز الحد الآمن لمسار الرفع الاحتياطي (2.8 ميجابايت).");
+    }
   } else {
     dataUrl = await blobToDataURL(file);
   }
