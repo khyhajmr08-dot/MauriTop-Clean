@@ -694,7 +694,7 @@ async function startServer() {
         ]);
         const staffRole = staffSnap.exists && staffSnap.data()?.active === true ? staffSnap.data()?.role : null;
         const userRole = userSnap.exists ? userSnap.data()?.role : null;
-        if (!["admin", "finance_manager"].includes(staffRole) && userRole !== "admin") {
+        if (!["admin", "finance", "finance_manager"].includes(staffRole) && userRole !== "admin") {
           return res.status(403).json({ error: "FORBIDDEN", message: "ليست لديك صلاحية إدارة طلبات السحب" });
         }
       }
