@@ -958,17 +958,37 @@ async function startServer() {
       }
 
       const orderData = snapshot.docs[0].data();
+      const toIso = (value: any) => {
+        if (!value) return null;
+        if (typeof value.toDate === "function") return value.toDate().toISOString();
+        if (value instanceof Date) return value.toISOString();
+        if (typeof value === "string") return value;
+        if (typeof value.seconds === "number") return new Date(value.seconds * 1000).toISOString();
+        return null;
+      };
+
       return res.json({
         success: true,
         order: {
           id: snapshot.docs[0].id,
-          serviceName: orderData.serviceName || orderData.serviceType,
+          isGuest: orderData.isGuest === true,
+          userName: orderData.userName || "زائر",
+          userEmail: orderData.userEmail || "",
+          serviceId: orderData.serviceId || "",
+          serviceName: orderData.serviceName || orderData.serviceType || "خدمة رقمية",
+          serviceType: orderData.serviceType || orderData.serviceName || "خدمة رقمية",
           amount: orderData.amount,
+          total: orderData.total ?? orderData.amount,
           status: orderData.status,
+          fields: orderData.fields || {},
+          paymentMethod: orderData.paymentMethod || "",
+          senderPhone: orderData.senderPhone || "",
+          proofImageUrl: orderData.proofImageUrl || orderData.proofUrl || "",
           pinCode: orderData.pinCode || null,
           adminNote: orderData.adminNote || null,
           rejectionReason: orderData.rejectionReason || null,
-          createdAt: orderData.createdAt
+          createdAt: toIso(orderData.createdAt),
+          updatedAt: toIso(orderData.updatedAt)
         }
       });
     } catch (err) {
