@@ -1247,12 +1247,21 @@ async function startServer() {
       const recipientId = safeFields.playerId || safeFields.email || safeFields.phone || safeFields.cardId || safeFields.username || senderPhone;
       if (recipientId && effectiveUserId) {
         try {
-          const activeOrdersQuery = await firestore.collection("orders")
+          let activeOrdersRef = firestore.collection("orders")
             .where("serviceId", "==", serviceId)
-            .where("status", "==", "pending")
-            .where("userId", "==", effectiveUserId)
-            .limit(6)
-            .get();
+            .where("status", "==", "pending");
+
+          if (decodedUser) {
+            activeOrdersRef = activeOrdersRef.where("userId", "==", effectiveUserId) as any;
+          } else if (senderPhone) {
+            activeOrdersRef = activeOrdersRef.where("senderPhone", "==", String(senderPhone).trim()) as any;
+          } else if (effectiveUserEmail) {
+            activeOrdersRef = activeOrdersRef.where("userEmail", "==", effectiveUserEmail) as any;
+          } else {
+            activeOrdersRef = activeOrdersRef.where("userId", "==", effectiveUserId) as any;
+          }
+
+          const activeOrdersQuery = await activeOrdersRef.limit(20).get();
 
           const hasDuplicateActive = activeOrdersQuery.docs.some(docSnap => {
             const d = docSnap.data();
