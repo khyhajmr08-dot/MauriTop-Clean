@@ -1512,10 +1512,10 @@ async function startServer() {
         }
 
         // Read all documents before writing anything in this Firestore transaction.
-        let userRef: FirebaseFirestore.DocumentReference | null = null;
-        let userSnap: FirebaseFirestore.DocumentSnapshot | null = null;
-        let referrerRef: FirebaseFirestore.DocumentReference | null = null;
-        let referrerSnap: FirebaseFirestore.DocumentSnapshot | null = null;
+        let userRef: any = null;
+        let userSnap: any = null;
+        let referrerRef: any = null;
+        let referrerSnap: any = null;
         let shouldRewardReferral = false;
 
         if (targetStatus === "completed" && currentData.userId && !currentData.isGuest) {
