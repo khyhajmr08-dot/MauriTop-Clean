@@ -473,67 +473,55 @@ export default function Dashboard() {
         return;
       }
 
-      // 2. Guest Tracking Flow (URL parameters or local storage)
+      // 2. Guest tracking: use only the private server tracking token.
+      // Order IDs and phone numbers are not authentication credentials.
       const tokenParam = searchParams.get("token");
       const idParam = searchParams.get("id");
-
-      const guestOrderIds: string[] = [];
-      if (idParam) guestOrderIds.push(idParam.trim().replace(/^#/, ""));
+      let storedOrders: any[] = [];
 
       try {
         const stored = JSON.parse(localStorage.getItem("mauritop_guest_orders") || "[]");
-        if (Array.isArray(stored)) {
-          stored.forEach((item: any) => {
-            if (item?.orderId && !guestOrderIds.includes(item.orderId)) {
-              guestOrderIds.push(item.orderId);
-            }
-          });
-        }
+        if (Array.isArray(stored)) storedOrders = stored.filter((item: any) => item?.orderId && item?.trackingToken);
       } catch (e) {
-        console.warn("Error reading guest orders from localStorage:", e);
+        console.warn("Error reading guest tracking records from localStorage:", e);
+      }
+
+      const tokensToFetch = new Map<string, string>();
+      if (tokenParam?.trim()) tokensToFetch.set(tokenParam.trim(), "");
+      if (idParam) {
+        const cleanId = idParam.trim().replace(/^#/, "");
+        const savedMatch = storedOrders.find((item: any) => item.orderId === cleanId);
+        if (savedMatch?.trackingToken) tokensToFetch.set(savedMatch.trackingToken, cleanId);
+      }
+      // Restore saved guest orders using their locally stored private tracking tokens only.
+      for (const item of storedOrders.slice(0, 10)) {
+        if (item.trackingToken) tokensToFetch.set(item.trackingToken, item.orderId);
       }
 
       const fetchedList: any[] = [];
-
-      // Query by token if provided
-      if (tokenParam) {
+      for (const [trackingToken] of Array.from(tokensToFetch.entries()).slice(0, 10)) {
         try {
-          const qToken = query(
-            collection(db, "orders"),
-            where("trackingToken", "==", tokenParam.trim())
-          );
-          const snapToken = await getDocs(qToken);
-          snapToken.docs.forEach((d) => {
-            fetchedList.push({ id: d.id, itemType: "order", ...d.data() });
-          });
-        } catch (err) {
-          console.warn("Error querying trackingToken:", err);
-        }
-      }
-
-      // Fetch individual guest order IDs
-      for (const oId of guestOrderIds.slice(0, 10)) {
-        if (fetchedList.some((o) => o.id === oId)) continue;
-        try {
-          const dSnap = await getDoc(doc(db, "orders", oId));
-          if (dSnap.exists()) {
-            fetchedList.push({ id: dSnap.id, itemType: "order", ...dSnap.data() });
+          const response = await fetch("/api/orders/track?token=" + encodeURIComponent(trackingToken));
+          if (!response.ok) continue;
+          const result = await response.json();
+          if (result?.success && result.order?.id) {
+            fetchedList.push({ ...result.order, itemType: "order", isGuest: true });
           }
         } catch (err) {
-          console.warn(`Error fetching guest order ${oId}:`, err);
+          console.warn("Guest tracking API request failed:", err);
         }
       }
 
-      fetchedList.sort((a, b) => {
-        const timeA = a.createdAt?.seconds || a.createdAt?.toMillis?.() || (Date.now() / 1000 + 10000);
-        const timeB = b.createdAt?.seconds || b.createdAt?.toMillis?.() || (Date.now() / 1000 + 10000);
-        return timeB - timeA;
-      });
+      const getOrderTimestamp = (value: any) => {
+        if (typeof value === "string") return Date.parse(value) || 0;
+        return value?.seconds ? value.seconds * 1000 : value?.toMillis?.() || 0;
+      };
+      fetchedList.sort((a, b) => getOrderTimestamp(b.createdAt) - getOrderTimestamp(a.createdAt));
 
       setRecentActivity(fetchedList);
       setLoading(false);
 
-      // Auto-open modal if specified in URL params
+      // Auto-open the matching order when opened from a private tracking link.
       if ((idParam || tokenParam) && fetchedList.length > 0) {
         const cleanId = idParam ? idParam.trim().replace(/^#/, "") : "";
         const target = cleanId ? fetchedList.find((o) => o.id === cleanId) : fetchedList[0];
@@ -542,6 +530,7 @@ export default function Dashboard() {
           setShowOrderModal(true);
         }
       }
+
     };
 
     fetchOrders();
@@ -558,51 +547,46 @@ export default function Dashboard() {
     haptic.light();
 
     try {
-      // 1. Try directly by document ID (strip leading #)
+      // Accept a private tracking token, or an order ID only when this device holds its matching token.
+      let trackingToken = queryStr;
       const cleanId = queryStr.replace(/^#/, "");
-      const orderRef = doc(db, "orders", cleanId);
-      const snap = await getDoc(orderRef);
-      if (snap.exists()) {
-        const orderData = { id: snap.id, itemType: "order", ...snap.data() };
-        setRecentActivity((prev) => [orderData, ...prev.filter((o) => o.id !== cleanId)]);
-        setSelectedOrder(orderData);
-        setShowOrderModal(true);
-        setIsGuestSearching(false);
-        return;
-      }
+      const looksLikeToken = /^[a-f0-9]{32,}$/i.test(queryStr);
 
-      // 2. Try by trackingToken
-      const qToken = query(collection(db, "orders"), where("trackingToken", "==", queryStr));
-      const snapToken = await getDocs(qToken);
-      if (!snapToken.empty) {
-        const orderData = { id: snapToken.docs[0].id, itemType: "order", ...snapToken.docs[0].data() };
-        setRecentActivity((prev) => [orderData, ...prev.filter((o) => o.id !== orderData.id)]);
-        setSelectedOrder(orderData);
-        setShowOrderModal(true);
-        setIsGuestSearching(false);
-        return;
-      }
-
-      // 3. Try by senderPhone
-      const cleanPhone = queryStr.replace(/\D/g, "");
-      if (cleanPhone.length >= 8) {
-        const qPhone = query(collection(db, "orders"), where("senderPhone", "==", cleanPhone));
-        const snapPhone = await getDocs(qPhone);
-        if (!snapPhone.empty) {
-          const list = snapPhone.docs.map((d) => ({ id: d.id, itemType: "order", ...d.data() }));
-          setRecentActivity(list);
-          setSelectedOrder(list[0]);
-          setShowOrderModal(true);
-          setIsGuestSearching(false);
-          return;
+      if (!looksLikeToken) {
+        try {
+          const stored = JSON.parse(localStorage.getItem("mauritop_guest_orders") || "[]");
+          const savedMatch = Array.isArray(stored) ? stored.find((item: any) => item?.orderId === cleanId) : null;
+          trackingToken = savedMatch?.trackingToken || "";
+        } catch {
+          trackingToken = "";
         }
       }
 
-      setGuestSearchError(
-        isArabic
-          ? "لم يتم العثور على أي طلب يطابق هذا الرقم أو المعرف. يرجى التأكد من كتابة الرقم بدقة."
-          : "Aucune commande trouvée avec ces identifiants."
-      );
+      if (!trackingToken) {
+        setGuestSearchError(
+          isArabic
+            ? "لأمان طلبك، أدخل رمز التتبع السري الموجود في رسالة تأكيد الطلب. رقم الطلب أو الهاتف وحده لا يكفي."
+            : "Pour protéger votre commande, saisissez votre jeton de suivi privé. Un numéro de commande ou de téléphone ne suffit pas."
+        );
+        return;
+      }
+
+      const response = await fetch("/api/orders/track?token=" + encodeURIComponent(trackingToken));
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result?.success || !result.order?.id) {
+        setGuestSearchError(
+          isArabic
+            ? "رمز التتبع غير صحيح أو لم يعد متاحاً. تحقق من الرمز وحاول مجدداً."
+            : "Jeton de suivi invalide ou introuvable. Vérifiez le code et réessayez."
+        );
+        return;
+      }
+
+      const orderData = { ...result.order, itemType: "order", isGuest: true };
+      setRecentActivity((prev) => [orderData, ...prev.filter((o) => o.id !== orderData.id)]);
+      setSelectedOrder(orderData);
+      setShowOrderModal(true);
+
     } catch (err: any) {
       console.warn("Guest order lookup error:", err);
       setGuestSearchError(isArabic ? "حدث خطأ أثناء البحث، يرجى المحاولة مرة أخرى." : "Erreur lors de la recherche.");
