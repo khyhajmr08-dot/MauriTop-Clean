@@ -496,19 +496,23 @@ async function startServer() {
 
       const firestore = getDb();
       const userRef = firestore.collection("users").doc(decoded.uid);
-      const pendingQuery = firestore.collection("withdrawals")
-        .where("userId", "==", decoded.uid)
-        .where("status", "==", "pending")
-        .limit(1);
+      const withdrawalLockRef = firestore.collection("withdrawal_locks").doc(decoded.uid);
+      const legacyUserWithdrawals = firestore.collection("withdrawals")
+        .where("userId", "==", decoded.uid);
 
       const result = await firestore.runTransaction(async (transaction) => {
-        const userSnap = await transaction.get(userRef);
+        const [userSnap, lockSnap, previousWithdrawalsSnap] = await Promise.all([
+          transaction.get(userRef),
+          transaction.get(withdrawalLockRef),
+          transaction.get(legacyUserWithdrawals)
+        ]);
         if (!userSnap.exists) throw new Error("WITHDRAWAL_USER_NOT_FOUND");
         const userData = userSnap.data() || {};
         if (userData.blocked === true) throw new Error("WITHDRAWAL_USER_BLOCKED");
 
-        const pendingSnap = await transaction.get(pendingQuery);
-        if (!pendingSnap.empty) throw new Error("WITHDRAWAL_ALREADY_PENDING");
+        const hasPendingLock = lockSnap.exists && lockSnap.data()?.status === "pending";
+        const hasLegacyPending = previousWithdrawalsSnap.docs.some((withdrawal) => withdrawal.data()?.status === "pending");
+        if (hasPendingLock || hasLegacyPending) throw new Error("WITHDRAWAL_ALREADY_PENDING");
 
         const currentPoints = Number(userData.loyaltyPoints || 0);
         if (!Number.isSafeInteger(currentPoints) || currentPoints < amount) {
@@ -530,6 +534,11 @@ async function startServer() {
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           adminNote: ""
+        });
+        transaction.set(withdrawalLockRef, {
+          withdrawalId: withdrawalRef.id,
+          status: "pending",
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
         return { withdrawalId: withdrawalRef.id, remainingPoints: currentPoints - amount };
@@ -590,6 +599,9 @@ async function startServer() {
         const withdrawal = withdrawalSnap.data() || {};
         if (withdrawal.status !== "pending") throw new Error("WITHDRAWAL_ALREADY_PROCESSED");
 
+        const withdrawalLockRef = firestore.collection("withdrawal_locks").doc(String(withdrawal.userId || ""));
+        const withdrawalLockSnap = await transaction.get(withdrawalLockRef);
+
         if (targetStatus === "rejected") {
           const userRef = firestore.collection("users").doc(String(withdrawal.userId || ""));
           const userSnap = await transaction.get(userRef);
@@ -609,6 +621,9 @@ async function startServer() {
           processedBy: decoded.uid,
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
+        if (withdrawalLockSnap.exists && withdrawalLockSnap.data()?.withdrawalId === withdrawalSnap.id) {
+          transaction.delete(withdrawalLockRef);
+        }
 
         const notificationRef = firestore.collection("notifications").doc();
         transaction.set(notificationRef, {
