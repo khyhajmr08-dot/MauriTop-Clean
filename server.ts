@@ -792,16 +792,30 @@ async function startServer() {
           const objectName = receiptUrl.pathname.startsWith(bucketPrefix)
             ? decodeURIComponent(receiptUrl.pathname.slice(bucketPrefix.length))
             : "";
+          const downloadToken = receiptUrl.searchParams.get("token") || "";
           if (receiptUrl.origin !== "https://firebasestorage.googleapis.com" ||
-              !objectName.startsWith("receipts/") ||
+              !objectName.startsWith(`receipts/${clientAttemptId}_`) ||
               receiptUrl.searchParams.get("alt") !== "media" ||
-              !receiptUrl.searchParams.get("token")) {
+              !downloadToken ||
+              !adminApp ||
+              !firebaseConfig.storageBucket) {
             throw new Error("INVALID_RECEIPT_URL");
+          }
+
+          // Verify the uploaded receipt really exists, is an image, and owns the supplied download token.
+          const receiptFile = getStorage(adminApp).bucket(firebaseConfig.storageBucket).file(objectName);
+          const [receiptMetadata] = await receiptFile.getMetadata();
+          const storedTokens = String(receiptMetadata.metadata?.firebaseStorageDownloadTokens || "")
+            .split(",")
+            .map((value: string) => value.trim())
+            .filter(Boolean);
+          if (!String(receiptMetadata.contentType || "").startsWith("image/") || !storedTokens.includes(downloadToken)) {
+            throw new Error("INVALID_RECEIPT_METADATA");
           }
         } catch {
           return res.status(400).json({
             error: "INVALID_RECEIPT_URL",
-            message: "رابط إيصال الدفع غير صالح أو لا يشير إلى تخزين Firebase المعتمد. يرجى إعادة رفع الإيصال."
+            message: "تعذر التحقق من إيصال الدفع أو أنه لا يخص محاولة الطلب الحالية. يرجى إعادة رفع الإيصال."
           });
         }
       }
