@@ -2,33 +2,88 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
-    // Service and public content images remain readable by the storefront.
-    // All new uploads are routed through the authenticated server endpoint.
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner() {
+      return signedIn() && (
+        request.auth.uid == 'PqXqqCgdC1eYPz4HKHHLtDRejPD3' ||
+        request.auth.token.email == 'khyhajmr08@gmail.com'
+      );
+    }
+
+    function hasActiveStaffRole(roles) {
+      return signedIn() &&
+        ('staffActive' in request.auth.token) &&
+        request.auth.token.staffActive == true &&
+        ('staffRole' in request.auth.token) &&
+        request.auth.token.staffRole in roles;
+    }
+
+    function isAdmin() {
+      return isOwner() ||
+        (signedIn() && ('role' in request.auth.token) && request.auth.token.role == 'admin') ||
+        hasActiveStaffRole(['admin']);
+    }
+
+    function canManageServiceImages() {
+      return isAdmin() || hasActiveStaffRole(['services_manager', 'catalog']);
+    }
+
+    function canManagePostImages() {
+      return isAdmin() || hasActiveStaffRole(['services_manager', 'content_manager', 'content', 'catalog']);
+    }
+
+    function canReviewKyc() {
+      return isAdmin() || hasActiveStaffRole(['orders_manager', 'orders']);
+    }
+
+    function isSafeImage(maxBytes) {
+      return request.resource != null &&
+        request.resource.size > 0 &&
+        request.resource.size <= maxBytes &&
+        request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
+    }
+
+    // Storefront assets: public read, narrowly scoped staff/owner writes.
     match /services/{fileName} {
       allow read: if true;
-      allow write: if false;
+      allow create, update: if canManageServiceImages() &&
+        fileName.matches('^[A-Za-z0-9_-]{1,140}\\.(webp|jpe?g|png|gif)$') &&
+        isSafeImage(8 * 1024 * 1024);
+      allow delete: if false;
     }
 
     match /posts/{fileName} {
       allow read: if true;
-      allow write: if false;
+      allow create, update: if canManagePostImages() &&
+        fileName.matches('^[A-Za-z0-9_-]{1,140}\\.(webp|jpe?g|png|gif)$') &&
+        isSafeImage(8 * 1024 * 1024);
+      allow delete: if false;
     }
 
-    // Read behavior is retained for current receipt and KYC screens.
-    // Server-side upload authorization is enforced by /api/upload.
+    // Guest checkout may upload an image receipt, but cannot overwrite or delete an existing receipt.
+    // The size ceiling also keeps the JSON/base64 server fallback below Vercel's 4.5 MB body limit.
     match /receipts/{fileName} {
       allow read: if true;
-      allow write: if false;
+      allow create: if fileName.matches('^att_[A-Za-z0-9_-]{8,128}_[0-9]+\\.(webp|jpe?g|png)$') &&
+        isSafeImage(3 * 1024 * 1024);
+      allow update, delete: if false;
     }
 
+    // KYC documents are private to their owner and the authorized reviewer roles.
     match /kyc/{fileName} {
-      // Require a signed-in session for KYC reads. Permanent download URLs remain bearer links,
-      // so the application must only expose them to the account owner and authorized reviewers.
-      allow read: if request.auth != null;
-      allow write: if false;
+      allow read: if isOwner() ||
+        (signedIn() && fileName.matches('^' + request.auth.uid + '_.*')) ||
+        canReviewKyc();
+      allow create: if signedIn() &&
+        fileName.matches('^' + request.auth.uid + '_[A-Za-z0-9_-]+\\.(webp|jpe?g|png|gif)$') &&
+        isSafeImage(8 * 1024 * 1024);
+      allow update, delete: if false;
     }
 
-    // Unknown storage paths are denied rather than inheriting public access.
+    // Unknown storage paths remain denied.
     match /{allPaths=**} {
       allow read, write: if false;
     }
