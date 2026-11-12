@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - chore/mauritop-phase1-baseline-ci
+      - feat/mauritop-phase3-mobile-vercel-preview
   pull_request:
     branches:
       - main
