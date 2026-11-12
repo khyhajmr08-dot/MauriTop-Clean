@@ -300,9 +300,9 @@ async function startServer() {
           const userData = userSnap.exists ? userSnap.data() : {};
           const userRole = userData?.staffRole || userData?.role;
           const allowedStaffRoles = folder === "services"
-            ? ["admin", "services_manager"]
-            : ["admin", "services_manager", "content_manager"];
-          if (!allowedStaffRoles.includes(staffRole) && userRole !== "admin" && userRole !== "services_manager") {
+            ? ["admin", "services_manager", "catalog"]
+            : ["admin", "services_manager", "content_manager", "content", "catalog"];
+          if (!allowedStaffRoles.includes(staffRole) && !allowedStaffRoles.includes(userRole)) {
             return res.status(403).json({ error: "UPLOAD_FORBIDDEN", message: "ليست لديك صلاحية رفع ملفات الإدارة" });
           }
         }
@@ -579,7 +579,7 @@ async function startServer() {
         ]);
         const staffRole = staffSnap.exists && staffSnap.data()?.active === true ? staffSnap.data()?.role : null;
         const userRole = userRoleSnap.exists ? userRoleSnap.data()?.role : null;
-        if (!["orders_manager", "admin"].includes(staffRole) && userRole !== "admin") {
+        if (!["orders_manager", "orders", "admin"].includes(staffRole) && userRole !== "admin") {
           return res.status(403).json({ error: "FORBIDDEN", message: "ليست لديك صلاحية مراجعة طلبات التوثيق" });
         }
       }
