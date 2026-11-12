@@ -136,7 +136,7 @@ function CategorySection({ category, items, onOpenService, isArabic, sortOption 
       </div>
 
       {/* Responsive Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5 xs:gap-3 sm:gap-4 w-full pt-1">
+      <div className="grid min-w-0 grid-cols-[repeat(2,minmax(0,1fr))] md:grid-cols-[repeat(3,minmax(0,1fr))] lg:grid-cols-[repeat(4,minmax(0,1fr))] xl:grid-cols-[repeat(5,minmax(0,1fr))] gap-2.5 xs:gap-3 sm:gap-4 w-full pt-1">
         {sortedItems.map((service, idx) => (
           <ServiceCard
             key={service.id}
