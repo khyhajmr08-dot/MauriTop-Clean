@@ -238,12 +238,13 @@ export default function ServiceGrid({ services, loading }: Props) {
                 initial="hidden"
                 whileInView="show"
                 viewport={{ once: true, margin: "-20px" }}
-                className="grid grid-cols-2 gap-3.5 sm:gap-6 md:grid-cols-3 lg:grid-cols-4 items-stretch"
+                className="grid min-w-0 grid-cols-[repeat(2,minmax(0,1fr))] gap-3.5 sm:gap-6 md:grid-cols-[repeat(3,minmax(0,1fr))] lg:grid-cols-[repeat(4,minmax(0,1fr))] items-stretch"
               >
                 {items.map((service, idx) => (
                   <motion.div
                     key={service.id}
                     variants={itemVariants}
+                    className="min-w-0 w-full"
                   >
                     <ServiceCard
                       service={service}
