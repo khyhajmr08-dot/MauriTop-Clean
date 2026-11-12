@@ -847,29 +847,34 @@ export default function AdminDashboard() {
     return withdrawalsList.filter(w => w.status === 'pending').length;
   }, [withdrawalsList]);
 
+  const submitWithdrawalDecision = async (w: any, status: "approved" | "rejected", adminNote = "") => {
+    if (!user) throw new Error("جلسة الإدارة غير متاحة");
+    const idToken = await user.getIdToken();
+    const response = await fetch(`/api/admin/withdrawals/${encodeURIComponent(w.id)}/status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`
+      },
+      body: JSON.stringify({ status, adminNote })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || "تعذرت معالجة طلب السحب");
+    }
+    return result;
+  };
+
   const handleApproveWithdrawal = async (w: any) => {
     if (!w) return;
     setWithdrawalActionLoading(true);
     try {
-      await updateDoc(doc(db, "withdrawals", w.id), {
-        status: 'approved',
-        updatedAt: serverTimestamp()
-      });
-
-      await addDoc(collection(db, "notifications"), {
-        userId: w.userId,
-        title: "تم سحب الأرباح بنجاح ✅",
-        body: `تم تأكيد تحويل مبلغ ${w.amount} أوقية جديدة بنجاح إلى حساب بنكيلي رقم (${w.bankilyPhone}) من قبل الإدارة. تم السحب بنجاح وتم التأكيد من العامل بطريقة احترافية 🚀`,
-        read: false,
-        type: "success",
-        createdAt: serverTimestamp()
-      });
-
-      showToast(`تمت الموافقة على سحب ${w.amount} MRU للعميل بنجاح`, "success");
-      setWithdrawalsList(prev => prev.map(item => item.id === w.id ? { ...item, status: 'approved' } : item));
-    } catch (err) {
+      await submitWithdrawalDecision(w, "approved");
+      showToast(`تمت الموافقة على سحب ${w.amount} MRU بنجاح`, "success");
+      setWithdrawalsList(prev => prev.map(item => item.id === w.id ? { ...item, status: "approved" } : item));
+    } catch (err: any) {
       console.error("Approve withdrawal error:", err);
-      showToast("حدث خطأ أثناء الموافقة على السحب", "error");
+      showToast(err?.message || "حدث خطأ أثناء الموافقة على السحب", "error");
     } finally {
       setWithdrawalActionLoading(false);
     }
@@ -883,38 +888,15 @@ export default function AdminDashboard() {
     }
     setWithdrawalActionLoading(true);
     try {
-      await updateDoc(doc(db, "withdrawals", w.id), {
-        status: 'rejected',
-        adminNote: reason.trim(),
-        updatedAt: serverTimestamp()
-      });
-
-      const userRef = doc(db, "users", w.userId);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
-        const currentPoints = userSnap.data().loyaltyPoints || 0;
-        await updateDoc(userRef, {
-          loyaltyPoints: currentPoints + Number(w.amount)
-        });
-      }
-
-      await addDoc(collection(db, "notifications"), {
-        userId: w.userId,
-        title: "تم رفض طلب سحب الأرباح ❌",
-        body: `نأسف، تم رفض طلب سحب مبلغ ${w.amount} أوقية. السبب: ${reason.trim()}. وتم إعادة الرصيد إلى رصيد نقاطك ومكافآتك.`,
-        read: false,
-        type: "error",
-        createdAt: serverTimestamp()
-      });
-
+      await submitWithdrawalDecision(w, "rejected", reason.trim());
       showToast("تم رفض طلب السحب وإعادة الرصيد للمستخدم بنجاح", "info");
       setIsWithdrawalRejectModalOpen(false);
       setSelectedWithdrawal(null);
       setWithdrawalRejectReason("");
-      setWithdrawalsList(prev => prev.map(item => item.id === w.id ? { ...item, status: 'rejected', adminNote: reason.trim() } : item));
-    } catch (err) {
+      setWithdrawalsList(prev => prev.map(item => item.id === w.id ? { ...item, status: "rejected", adminNote: reason.trim() } : item));
+    } catch (err: any) {
       console.error("Reject withdrawal error:", err);
-      showToast("حدث خطأ أثناء رفض السحب", "error");
+      showToast(err?.message || "حدث خطأ أثناء رفض طلب السحب", "error");
     } finally {
       setWithdrawalActionLoading(false);
     }
