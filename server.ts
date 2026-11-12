@@ -612,8 +612,55 @@ async function startServer() {
         if (!userSnap.exists) throw new Error("KYC_USER_NOT_FOUND");
 
         const userData = userSnap.data() || {};
-        const hasSubmission = Boolean(userData.kyc_submitted_at || requestSnap.exists);
-        if (!hasSubmission) throw new Error("KYC_SUBMISSION_NOT_FOUND");
+        const fullName = String(userData.kyc_full_name || "").trim();
+        const phoneDigits = String(userData.kyc_phone || "").replace(/[^0-9]/g, "");
+        const idNumber = String(userData.kyc_id_number || "").trim();
+        const city = String(userData.kyc_city || "").trim();
+        const address = String(userData.kyc_address_gps || "").trim();
+        const imageUrl = String(userData.kyc_id_image || "").trim();
+        if (
+          fullName.split(/\\s+/).filter(Boolean).length < 2 ||
+          phoneDigits.length < 8 ||
+          !idNumber ||
+          !city ||
+          !address ||
+          !userData.kyc_submitted_at ||
+          userData.reviewStatus !== "Under Review" ||
+          userData.kyc_completed === true
+        ) {
+          throw new Error("KYC_SUBMISSION_INCOMPLETE");
+        }
+
+        // Verify the uploaded identity document exists in this user's KYC folder and its token matches.
+        try {
+          const imageUrlParsed = new URL(imageUrl);
+          const bucketPrefix = `/v0/b/${firebaseConfig.storageBucket}/o/`;
+          const objectName = imageUrlParsed.pathname.startsWith(bucketPrefix)
+            ? decodeURIComponent(imageUrlParsed.pathname.slice(bucketPrefix.length))
+            : "";
+          const downloadToken = imageUrlParsed.searchParams.get("token") || "";
+          if (
+            imageUrlParsed.origin !== "https://firebasestorage.googleapis.com" ||
+            !objectName.startsWith(`kyc/${targetUid}_`) ||
+            imageUrlParsed.searchParams.get("alt") !== "media" ||
+            !downloadToken ||
+            !firebaseConfig.storageBucket
+          ) {
+            throw new Error("KYC_IMAGE_URL_INVALID");
+          }
+
+          const imageFile = getStorage().bucket(firebaseConfig.storageBucket).file(objectName);
+          const [imageMetadata] = await imageFile.getMetadata();
+          const downloadTokens = String(imageMetadata.metadata?.firebaseStorageDownloadTokens || "")
+            .split(",")
+            .map((value: string) => value.trim())
+            .filter(Boolean);
+          if (!String(imageMetadata.contentType || "").startsWith("image/") || !downloadTokens.includes(downloadToken)) {
+            throw new Error("KYC_IMAGE_METADATA_INVALID");
+          }
+        } catch (imageError) {
+          throw new Error("KYC_IMAGE_INVALID");
+        }
 
         const approved = targetStatus === "approved";
         const reviewStatus = approved ? "Active" : "Rejected";
@@ -672,8 +719,11 @@ async function startServer() {
       if (err.message === "KYC_USER_NOT_FOUND") {
         return res.status(404).json({ error: err.message, message: "ملف المستخدم غير موجود" });
       }
-      if (err.message === "KYC_SUBMISSION_NOT_FOUND") {
-        return res.status(409).json({ error: err.message, message: "لا يوجد طلب توثيق مُرسل لهذا المستخدم" });
+      if (err.message === "KYC_SUBMISSION_INCOMPLETE") {
+        return res.status(409).json({ error: err.message, message: "بيانات طلب التوثيق غير مكتملة أو لم تُرسل من النموذج المعتمد" });
+      }
+      if (err.message === "KYC_IMAGE_INVALID") {
+        return res.status(409).json({ error: err.message, message: "تعذر التحقق من صورة وثيقة الهوية المحفوظة في التخزين السحابي" });
       }
       console.error("[KYC Review Error]:", err?.message || err);
       return res.status(503).json({ error: "KYC_REVIEW_UNAVAILABLE", message: "تعذرت معالجة طلب التوثيق حالياً. لم يتم تأكيد أي تغيير." });
