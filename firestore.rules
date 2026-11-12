@@ -61,14 +61,18 @@ service cloud.firestore {
         request.auth.uid == userId &&
         request.resource.data.role == 'user' &&
         request.resource.data.blocked == false &&
-        request.resource.data.isVerified == false &&
-        request.resource.data.referralsCount == 0 &&
-        request.resource.data.referralEarnings == 0 &&
-        request.resource.data.loyaltyPoints == 0 &&
+        (!('isVerified' in request.resource.data) || request.resource.data.isVerified == false) &&
+        (!('referralsCount' in request.resource.data) || request.resource.data.referralsCount == 0) &&
+        (!('referralEarnings' in request.resource.data) || request.resource.data.referralEarnings == 0) &&
+        (!('loyaltyPoints' in request.resource.data) || request.resource.data.loyaltyPoints == 0) &&
+        (!('isReferralRewarded' in request.resource.data) || request.resource.data.isReferralRewarded == false) &&
+        (!('referredBy' in request.resource.data) ||
+          request.resource.data.referredBy == null ||
+          (request.resource.data.referredBy is string &&
+           request.resource.data.referredBy != request.auth.uid &&
+           exists(/databases/$(database)/documents/users/$(request.resource.data.referredBy)))) &&
         !('staffRole' in request.resource.data) &&
-        !('balance' in request.resource.data) &&
-        !('isReferralRewarded' in request.resource.data) &&
-        !('referredBy' in request.resource.data)
+        !('balance' in request.resource.data)
       );
 
       // Users may edit ordinary profile details only; privilege, verification and money fields are server/admin controlled.
