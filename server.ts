@@ -1006,16 +1006,20 @@ async function startServer() {
           return res.status(503).json({ error: "PAYMENT_SETTINGS_UNAVAILABLE", message: "تعذر التحقق من طرق الدفع حالياً. لم يتم قبول الطلب." });
         }
 
-        // Match the application's configured defaults; never activate unknown wallets implicitly.
-        if (!paymentMethods) {
-          paymentMethods = {
-            bankily: { enabled: true, labelAr: "بنكيلي", labelFr: "Bankily" },
-            sadad: { enabled: true, labelAr: "سداد", labelFr: "Sedad" },
-            gaza: { enabled: false, labelAr: "غزة باي", labelFr: "GazaPay" }
-          };
-        }
+        // Merge partial saved settings with the same explicit defaults used by the customer UI.
+        // Explicit admin disable flags are preserved; unknown payment providers remain disabled.
+        const defaultPaymentMethods: Record<string, any> = {
+          bankily: { enabled: true, labelAr: "بنكيلي", labelFr: "Bankily" },
+          sadad: { enabled: true, labelAr: "سداد", labelFr: "Sedad" },
+          gaza: { enabled: false, labelAr: "غزة باي", labelFr: "GazaPay" },
+          paypal: { enabled: false, labelAr: "بايبال", labelFr: "PayPal" }
+        };
+        paymentMethods = {
+          ...defaultPaymentMethods,
+          ...(paymentMethods && typeof paymentMethods === "object" ? paymentMethods : {})
+        };
 
-        const methodConfig = paymentMethods ? paymentMethods[paymentMethod] : null;
+        const methodConfig = paymentMethods[paymentMethod] || null;
 
         if (!methodConfig) {
           return res.status(400).json({ error: "PAYMENT_METHOD_INVALID", message: "طريقة الدفع المحددة غير معروفة" });
