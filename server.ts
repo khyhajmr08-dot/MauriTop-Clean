@@ -1286,8 +1286,15 @@ async function startServer() {
 
       // Deterministic server-side lock prevents two distinct attempt IDs from creating
       // concurrent pending orders for the same account, service and recipient.
+      const guestLockIdentity = isGuest
+        ? (
+            String(senderPhone || "").replace(/[^0-9]/g, "") ||
+            String(effectiveUserEmail || "").trim().toLowerCase() ||
+            clientAttemptId
+          )
+        : effectiveUserId;
       const activeOrderLockId = recipientId
-        ? crypto.createHash("sha256").update(JSON.stringify([effectiveUserId, serviceId, String(recipientId)])).digest("hex")
+        ? crypto.createHash("sha256").update(JSON.stringify([guestLockIdentity, serviceId, String(recipientId)])).digest("hex")
         : null;
       const activeOrderLockRef = activeOrderLockId
         ? firestore.collection("order_active_locks").doc(activeOrderLockId)
@@ -1551,9 +1558,16 @@ async function startServer() {
         const recipientId = currentData.fields?.playerId || currentData.fields?.email ||
           currentData.fields?.phone || currentData.fields?.cardId ||
           currentData.fields?.username || currentData.senderPhone || "";
+        const lockIdentity = currentData.isGuest === true
+          ? (
+              String(currentData.senderPhone || "").replace(/[^0-9]/g, "") ||
+              String(currentData.userEmail || "").trim().toLowerCase() ||
+              String(currentData.userId || "")
+            )
+          : String(currentData.userId || "");
         const activeOrderLockId = recipientId
           ? crypto.createHash("sha256").update(JSON.stringify([
-              String(currentData.userId || ""),
+              lockIdentity,
               String(currentData.serviceId || ""),
               String(recipientId)
             ])).digest("hex")
