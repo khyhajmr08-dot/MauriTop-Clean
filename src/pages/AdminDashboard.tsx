@@ -417,39 +417,7 @@ export default function AdminDashboard() {
         details: `تحديث الحالة إلى (${status}). ${effectiveNote ? `ملاحظة: ${effectiveNote}` : ''}`
       });
 
-      const statusTitleMap: Record<string, string> = {
-        'pending': 'تم إرجاع طلبك للمراجعة',
-        'approved': 'تم قبول طلبك وبدء معالجته ✅',
-        'shipped': 'تم شحن/إرسال طلبك 📦',
-        'rejected': 'تم رفض طلبك ❌',
-        'completed': 'تم إكمال طلبك وشحنه بنجاح 🚀'
-      };
-
-      const orderRefNum = target.id.slice(0, 8).toUpperCase();
-      let notificationBody = "";
-      if (status === "completed") {
-        notificationBody = `اكتملت عملية شحن طلبك لخدمة (${target.serviceType || target.serviceName}). شكرًا لاستخدامك MAURITOP.${effectiveNote ? ` ملاحظة: ${effectiveNote}` : ''}${extraData?.pinCode ? ` كود الشحن: ${extraData.pinCode}` : ''}`;
-      } else if (status === "approved") {
-        notificationBody = `تم قبول طلبك لخدمة (${target.serviceType || target.serviceName}) وجاري تنفيذه وشحنه الآن.${effectiveNote ? ` ملاحظة: ${effectiveNote}` : ''}`;
-      } else if (status === "shipped") {
-        notificationBody = `تم شحن طلبك لخدمة (${target.serviceType || target.serviceName}).${effectiveNote ? ` ملاحظة: ${effectiveNote}` : ''}`;
-      } else if (status === "rejected") {
-        notificationBody = `تم رفض الطلب رقم #${orderRefNum}. سبب الرفض: ${effectiveRejection}. يرجى مراجعة التفاصيل أو التواصل مع الدعم.`;
-      } else {
-        notificationBody = `تم تغيير حالة طلبك رقم #${orderRefNum} إلى قيد الانتظار.${effectiveNote ? ` ملاحظة: ${effectiveNote}` : ''}`;
-      }
-
-      if (target.userId) {
-        await addDoc(collection(db, "notifications"), {
-          userId: target.userId,
-          orderId: target.id,
-          title: statusTitleMap[status] || "تحديث على طلبك",
-          body: notificationBody,
-          read: false,
-          type: status === "completed" ? "success" : status === "rejected" ? "error" : "info",
-          createdAt: serverTimestamp()
-        }).catch((e) => console.warn("Failed to create customer notification:", e));
-      }
+      // Customer notification is created inside the same server transaction as the order update.
 
       if (status === "approved") {
         showToast("تم قبول طلب الشحن وبدء معالجته بنجاح ⚡", "success");
