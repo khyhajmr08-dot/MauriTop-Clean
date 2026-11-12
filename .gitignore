@@ -26,3 +26,6 @@ ui-debug.log
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Local/CI Express bundle (never part of public Vite output)
+.server-build/
