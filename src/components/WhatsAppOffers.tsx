@@ -179,7 +179,7 @@ export const WhatsAppOffers: React.FC = () => {
             scrollPaddingInlineStart: '14px',
           }}
         >
-          {offers.map((offer) => {
+          {offers.map((offer, index) => {
             const timeInfo = getRemainingTime(offer, now);
 
             return (
@@ -210,6 +210,9 @@ export const WhatsAppOffers: React.FC = () => {
                       src={offer.imageUrl} 
                       alt={offer.title} 
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                      loading={index === 0 ? "eager" : "lazy"}
+                      fetchPriority={index === 0 ? "high" : "auto"}
+                      decoding="async"
                       referrerPolicy="no-referrer"
                     />
                   ) : (
