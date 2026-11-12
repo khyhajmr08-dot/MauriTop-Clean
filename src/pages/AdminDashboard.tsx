@@ -365,44 +365,42 @@ export default function AdminDashboard() {
 
     try {
       setIsUpdatingStatus(true);
+      const now = new Date();
       const updateData: any = {
         status: status.toLowerCase(),
         adminNote: effectiveNote || null,
         rejectionReason: status === "rejected" ? effectiveRejection : null,
-        updatedAt: serverTimestamp()
+        updatedAt: now
       };
 
       if (extraData?.pinCode) {
         updateData.pinCode = extraData.pinCode;
       }
       if (status === "completed") {
-        updateData.completedAt = serverTimestamp();
+        updateData.completedAt = now;
       }
 
-      // Update Firestore directly using Client SDK under authenticated admin security rules
-      const orderRef = doc(db, "orders", target.id);
-      await updateDoc(orderRef, updateData);
-
-      // Handle referral rewards if completing an order with referral metadata
-      let referralRewarded = false;
-      if (status === "completed" && target.referredBy && !target.isReferralRewarded) {
-        try {
-          const referrerRef = doc(db, "users", target.referredBy);
-          const referrerSnap = await getDoc(referrerRef);
-          if (referrerSnap.exists()) {
-            const currentEarnings = referrerSnap.data()?.referralEarnings || 0;
-            const currentBalance = referrerSnap.data()?.balance || 0;
-            await updateDoc(referrerRef, {
-              referralEarnings: currentEarnings + 30,
-              balance: currentBalance + 30
-            });
-            await updateDoc(orderRef, { isReferralRewarded: true });
-            referralRewarded = true;
-          }
-        } catch (refErr) {
-          console.warn("Referral auto-credit note:", refErr);
-        }
+      // The server validates the staff role and updates the order plus referral rewards atomically.
+      if (!user) throw new Error("جلسة الإدارة غير متاحة");
+      const idToken = await user.getIdToken();
+      const response = await fetch(`/api/admin/orders/${encodeURIComponent(target.id)}/status`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`
+        },
+        body: JSON.stringify({
+          status: status.toLowerCase(),
+          adminNote: effectiveNote || "",
+          rejectionReason: status === "rejected" ? effectiveRejection : "",
+          pinCode: extraData?.pinCode || ""
+        })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "تعذر تحديث الطلب في الخادم");
       }
+      const referralRewarded = result.referralRewarded === true;
 
       // Optimistic update of local orders array immediately
       setOrders(prev => prev.map(o => o.id === target.id ? { ...o, ...updateData, status: status.toLowerCase(), updatedAt: new Date() } : o));
@@ -419,39 +417,7 @@ export default function AdminDashboard() {
         details: `تحديث الحالة إلى (${status}). ${effectiveNote ? `ملاحظة: ${effectiveNote}` : ''}`
       });
 
-      const statusTitleMap: Record<string, string> = {
-        'pending': 'تم إرجاع طلبك للمراجعة',
-        'approved': 'تم قبول طلبك وبدء معالجته ✅',
-        'shipped': 'تم شحن/إرسال طلبك 📦',
-        'rejected': 'تم رفض طلبك ❌',
-        'completed': 'تم إكمال طلبك وشحنه بنجاح 🚀'
-      };
-
-      const orderRefNum = target.id.slice(0, 8).toUpperCase();
-      let notificationBody = "";
-      if (status === "completed") {
-        notificationBody = `اكتملت عملية شحن طلبك لخدمة (${target.serviceType || target.serviceName}). شكرًا لاستخدامك MAURITOP.${effectiveNote ? ` ملاحظة: ${effectiveNote}` : ''}${extraData?.pinCode ? ` كود الشحن: ${extraData.pinCode}` : ''}`;
-      } else if (status === "approved") {
-        notificationBody = `تم قبول طلبك لخدمة (${target.serviceType || target.serviceName}) وجاري تنفيذه وشحنه الآن.${effectiveNote ? ` ملاحظة: ${effectiveNote}` : ''}`;
-      } else if (status === "shipped") {
-        notificationBody = `تم شحن طلبك لخدمة (${target.serviceType || target.serviceName}).${effectiveNote ? ` ملاحظة: ${effectiveNote}` : ''}`;
-      } else if (status === "rejected") {
-        notificationBody = `تم رفض الطلب رقم #${orderRefNum}. سبب الرفض: ${effectiveRejection}. يرجى مراجعة التفاصيل أو التواصل مع الدعم.`;
-      } else {
-        notificationBody = `تم تغيير حالة طلبك رقم #${orderRefNum} إلى قيد الانتظار.${effectiveNote ? ` ملاحظة: ${effectiveNote}` : ''}`;
-      }
-
-      if (target.userId) {
-        await addDoc(collection(db, "notifications"), {
-          userId: target.userId,
-          orderId: target.id,
-          title: statusTitleMap[status] || "تحديث على طلبك",
-          body: notificationBody,
-          read: false,
-          type: status === "completed" ? "success" : status === "rejected" ? "error" : "info",
-          createdAt: serverTimestamp()
-        }).catch((e) => console.warn("Failed to create customer notification:", e));
-      }
+      // Customer notification is created inside the same server transaction as the order update.
 
       if (status === "approved") {
         showToast("تم قبول طلب الشحن وبدء معالجته بنجاح ⚡", "success");
@@ -530,6 +496,10 @@ export default function AdminDashboard() {
 
   const handleToggleUserRole = async (targetUser: any) => {
     if (!targetUser) return;
+    if (!isOwner) {
+      showToast("تغيير أدوار المستخدمين متاح لمالك المنصة فقط", "error");
+      return;
+    }
     const isTargetAdmin = targetUser.role === 'admin';
     const newRole = isTargetAdmin ? 'user' : 'admin';
     try {
@@ -651,6 +621,10 @@ export default function AdminDashboard() {
   };
 
   const handleToggleBlock = async (uid: string, currentStatus: boolean) => {
+    if (!isOwner) {
+      showToast("حظر الحسابات وإلغاء الحظر متاح لمالك المنصة فقط", "error");
+      return;
+    }
     try {
       setBlockingUserId(uid);
       await updateDoc(doc(db, "users", uid), {
@@ -667,6 +641,10 @@ export default function AdminDashboard() {
   };
 
   const handleMarkPhoneStatus = async (uid: string, status: 'invalid' | 'valid') => {
+    if (!isOwner) {
+      showToast("اعتماد أرقام الهواتف متاح لمالك المنصة فقط", "error");
+      return;
+    }
     try {
       setPhoneActionUserId(uid);
       await updateDoc(doc(db, "users", uid), {
@@ -696,6 +674,24 @@ export default function AdminDashboard() {
     return usersList.filter(u => u.reviewStatus === 'Under Review').length;
   }, [usersList]);
 
+  const submitKycDecision = async (targetUser: any, status: "approved" | "rejected", reason = "") => {
+    if (!user) throw new Error("جلسة الإدارة غير متاحة");
+    const idToken = await user.getIdToken();
+    const response = await fetch(`/api/admin/kyc/${encodeURIComponent(targetUser.id)}/status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`
+      },
+      body: JSON.stringify({ status, reason })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || "تعذرت معالجة طلب التوثيق");
+    }
+    return result;
+  };
+
   const handleApproveKyc = async (targetUser: any) => {
     if (!targetUser) return;
     if (!isOwner && !permissions.canManageKyc) {
@@ -704,63 +700,14 @@ export default function AdminDashboard() {
     }
     setKycActionLoading(true);
     try {
-      const nowIso = new Date().toISOString();
-      const reviewerIdentifier = user?.email || user?.uid || 'admin';
-      const reviewerName = profile?.name || user?.displayName || 'إدارة موري توب';
-
-      const userRef = doc(db, "users", targetUser.id);
-      await updateDoc(userRef, {
-        reviewStatus: 'Active',
-        isVerified: true,
-        kyc_completed: true,
-        verifiedAt: nowIso,
-        reviewedBy: reviewerIdentifier,
-        reviewedByName: reviewerName,
-        blockReason: ''
-      });
-
-      try {
-        await setDoc(doc(db, "kyc_requests", targetUser.id), {
-          reviewStatus: 'Active',
-          isVerified: true,
-          kyc_completed: true,
-          verifiedAt: nowIso,
-          reviewedBy: reviewerIdentifier,
-          reviewedByName: reviewerName
-        }, { merge: true });
-      } catch (e) {
-        console.warn("kyc_requests sync:", e);
-      }
-
-      await addDoc(collection(db, "notifications"), {
-        userId: targetUser.id,
-        title: "تهانينا! تم توثيق حسابك بنجاح 🎉",
-        message: "قامت إدارة منصة موري توب بمراجعة وثائق الهوية الخاصة بك وتوثيق حسابك رسمياً وحصولك على شارة التوثيق المعتمَدة.",
-        read: false,
-        createdAt: serverTimestamp()
-      });
-
-      // Immutable Audit Log
-      try {
-        await addDoc(collection(db, "audit_logs"), {
-          action: "KYC_APPROVED",
-          targetUserId: targetUser.id,
-          targetUserEmail: targetUser.email || targetUser.phoneNumber || "N/A",
-          performedBy: reviewerIdentifier,
-          performedByName: reviewerName,
-          timestamp: serverTimestamp()
-        });
-      } catch (auditErr) {
-        console.warn("Audit log write error:", auditErr);
-      }
-
+      await submitKycDecision(targetUser, "approved");
       showToast(`تم توثيق حساب ${targetUser.name || targetUser.email} بنجاح!`, "success");
       setIsKycModalOpen(false);
       setSelectedKycUser(null);
       await fetchUsers(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error("KYC Approve Error:", err);
-      showToast("فشل توثيق الحساب، يرجى إعادة المحاولة", "error");
+      showToast(err?.message || "فشل توثيق الحساب، يرجى إعادة المحاولة", "error");
     } finally {
       setKycActionLoading(false);
     }
@@ -778,66 +725,16 @@ export default function AdminDashboard() {
     }
     setKycActionLoading(true);
     try {
-      const nowIso = new Date().toISOString();
-      const reviewerIdentifier = user?.email || user?.uid || 'admin';
-      const reviewerName = profile?.name || user?.displayName || 'إدارة موري توب';
-
-      const userRef = doc(db, "users", targetUser.id);
-      await updateDoc(userRef, {
-        reviewStatus: 'Rejected',
-        isVerified: false,
-        kyc_completed: false,
-        blockReason: reason.trim(),
-        reviewedBy: reviewerIdentifier,
-        reviewedByName: reviewerName,
-        reviewedAt: nowIso
-      });
-
-      try {
-        await setDoc(doc(db, "kyc_requests", targetUser.id), {
-          reviewStatus: 'Rejected',
-          isVerified: false,
-          blockReason: reason.trim(),
-          reviewedBy: reviewerIdentifier,
-          reviewedByName: reviewerName,
-          reviewedAt: nowIso
-        }, { merge: true });
-      } catch (e) {
-        console.warn("kyc_requests sync:", e);
-      }
-
-      await addDoc(collection(db, "notifications"), {
-        userId: targetUser.id,
-        title: "تنبيه بخصوص طلب توثيق الحساب (KYC) ⚠️",
-        message: `نأسف لإبلاغك بأنه تعذر قبول طلب التوثيق بالبيانات الحالية للسبب التالي: ${reason.trim()}. يرجى إعادة رفع وثيقة واضحة وصحيحة.`,
-        read: false,
-        createdAt: serverTimestamp()
-      });
-
-      // Immutable Audit Log
-      try {
-        await addDoc(collection(db, "audit_logs"), {
-          action: "KYC_REJECTED",
-          targetUserId: targetUser.id,
-          targetUserEmail: targetUser.email || targetUser.phoneNumber || "N/A",
-          reason: reason.trim(),
-          performedBy: reviewerIdentifier,
-          performedByName: reviewerName,
-          timestamp: serverTimestamp()
-        });
-      } catch (auditErr) {
-        console.warn("Audit log write error:", auditErr);
-      }
-
+      await submitKycDecision(targetUser, "rejected", reason.trim());
       showToast(`تم رفض طلب توثيق ${targetUser.name || targetUser.email}`, "info");
       setIsKycRejectModalOpen(false);
       setIsKycModalOpen(false);
       setKycRejectReason("");
       setSelectedKycUser(null);
       await fetchUsers(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error("KYC Reject Error:", err);
-      showToast("فشل تحديث حالة الطلب", "error");
+      showToast(err?.message || "فشل تحديث حالة الطلب", "error");
     } finally {
       setKycActionLoading(false);
     }
@@ -847,29 +744,34 @@ export default function AdminDashboard() {
     return withdrawalsList.filter(w => w.status === 'pending').length;
   }, [withdrawalsList]);
 
+  const submitWithdrawalDecision = async (w: any, status: "approved" | "rejected", adminNote = "") => {
+    if (!user) throw new Error("جلسة الإدارة غير متاحة");
+    const idToken = await user.getIdToken();
+    const response = await fetch(`/api/admin/withdrawals/${encodeURIComponent(w.id)}/status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`
+      },
+      body: JSON.stringify({ status, adminNote })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || "تعذرت معالجة طلب السحب");
+    }
+    return result;
+  };
+
   const handleApproveWithdrawal = async (w: any) => {
     if (!w) return;
     setWithdrawalActionLoading(true);
     try {
-      await updateDoc(doc(db, "withdrawals", w.id), {
-        status: 'approved',
-        updatedAt: serverTimestamp()
-      });
-
-      await addDoc(collection(db, "notifications"), {
-        userId: w.userId,
-        title: "تم سحب الأرباح بنجاح ✅",
-        body: `تم تأكيد تحويل مبلغ ${w.amount} أوقية جديدة بنجاح إلى حساب بنكيلي رقم (${w.bankilyPhone}) من قبل الإدارة. تم السحب بنجاح وتم التأكيد من العامل بطريقة احترافية 🚀`,
-        read: false,
-        type: "success",
-        createdAt: serverTimestamp()
-      });
-
-      showToast(`تمت الموافقة على سحب ${w.amount} MRU للعميل بنجاح`, "success");
-      setWithdrawalsList(prev => prev.map(item => item.id === w.id ? { ...item, status: 'approved' } : item));
-    } catch (err) {
+      await submitWithdrawalDecision(w, "approved");
+      showToast(`تمت الموافقة على سحب ${w.amount} MRU بنجاح`, "success");
+      setWithdrawalsList(prev => prev.map(item => item.id === w.id ? { ...item, status: "approved" } : item));
+    } catch (err: any) {
       console.error("Approve withdrawal error:", err);
-      showToast("حدث خطأ أثناء الموافقة على السحب", "error");
+      showToast(err?.message || "حدث خطأ أثناء الموافقة على السحب", "error");
     } finally {
       setWithdrawalActionLoading(false);
     }
@@ -883,38 +785,15 @@ export default function AdminDashboard() {
     }
     setWithdrawalActionLoading(true);
     try {
-      await updateDoc(doc(db, "withdrawals", w.id), {
-        status: 'rejected',
-        adminNote: reason.trim(),
-        updatedAt: serverTimestamp()
-      });
-
-      const userRef = doc(db, "users", w.userId);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
-        const currentPoints = userSnap.data().loyaltyPoints || 0;
-        await updateDoc(userRef, {
-          loyaltyPoints: currentPoints + Number(w.amount)
-        });
-      }
-
-      await addDoc(collection(db, "notifications"), {
-        userId: w.userId,
-        title: "تم رفض طلب سحب الأرباح ❌",
-        body: `نأسف، تم رفض طلب سحب مبلغ ${w.amount} أوقية. السبب: ${reason.trim()}. وتم إعادة الرصيد إلى رصيد نقاطك ومكافآتك.`,
-        read: false,
-        type: "error",
-        createdAt: serverTimestamp()
-      });
-
+      await submitWithdrawalDecision(w, "rejected", reason.trim());
       showToast("تم رفض طلب السحب وإعادة الرصيد للمستخدم بنجاح", "info");
       setIsWithdrawalRejectModalOpen(false);
       setSelectedWithdrawal(null);
       setWithdrawalRejectReason("");
-      setWithdrawalsList(prev => prev.map(item => item.id === w.id ? { ...item, status: 'rejected', adminNote: reason.trim() } : item));
-    } catch (err) {
+      setWithdrawalsList(prev => prev.map(item => item.id === w.id ? { ...item, status: "rejected", adminNote: reason.trim() } : item));
+    } catch (err: any) {
       console.error("Reject withdrawal error:", err);
-      showToast("حدث خطأ أثناء رفض السحب", "error");
+      showToast(err?.message || "حدث خطأ أثناء رفض طلب السحب", "error");
     } finally {
       setWithdrawalActionLoading(false);
     }
@@ -2037,7 +1916,7 @@ export default function AdminDashboard() {
                                         isPhoneInvalid ? (
                                           <button
                                             onClick={() => handleMarkPhoneStatus(u.id, 'valid')}
-                                            disabled={phoneActionUserId === u.id}
+                                            disabled={!isOwner || phoneActionUserId === u.id}
                                             className="text-[10px] font-black px-2.5 py-1 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-600 hover:text-white transition-all cursor-pointer active:scale-95 disabled:opacity-50"
                                             title="تأكيد صحة الرقم"
                                           >
@@ -2058,7 +1937,7 @@ export default function AdminDashboard() {
                                       <button
                                         type="button"
                                         onClick={() => handleToggleUserRole(u)}
-                                        disabled={roleActionUserId === u.id}
+                                        disabled={!isOwner || roleActionUserId === u.id}
                                         className={cn(
                                           "text-[10px] font-black px-2.5 py-1 rounded-xl border transition-all cursor-pointer active:scale-95 disabled:opacity-50 inline-flex items-center gap-1",
                                           u.role === 'admin'
@@ -2084,7 +1963,7 @@ export default function AdminDashboard() {
 
                                       <button 
                                         onClick={() => handleToggleBlock(u.id, !!u.blocked)}
-                                        disabled={blockingUserId === u.id}
+                                        disabled={!isOwner || blockingUserId === u.id}
                                         className={cn(
                                           "text-[11px] font-black px-3 py-1.5 rounded-xl transition-all inline-flex items-center justify-center min-w-[70px] disabled:opacity-50 cursor-pointer active:scale-95",
                                           u.blocked ? "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-600 hover:text-white" : "bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-600 hover:text-white"

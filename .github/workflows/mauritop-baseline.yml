@@ -1,0 +1,133 @@
+name: MAURITOP baseline validation
+
+on:
+  push:
+    branches:
+      - chore/mauritop-phase1-baseline-ci
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mauritop-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reconcile_lockfile:
+    name: Reconcile package-manager lockfiles
+    if: github.event_name == 'push' && github.ref == 'refs/heads/chore/mauritop-phase1-baseline-ci'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      head_sha: ${{ steps.commit.outputs.head_sha }}
+    steps:
+      - name: Checkout isolated working branch
+        uses: actions/checkout@v7
+        with:
+          ref: chore/mauritop-phase1-baseline-ci
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Reconcile npm lockfile with package.json
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+      - name: Remove obsolete conflicting Bun lockfile
+        run: |
+          if [ -f bun.lock ]; then
+            git rm bun.lock
+          fi
+
+      - name: Commit reconciled lockfile state
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(deps): reconcile npm lockfile with package manifest"
+            git push origin HEAD:refs/heads/chore/mauritop-phase1-baseline-ci
+          else
+            echo "Lockfile state is already reconciled."
+          fi
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Clean install, type-check and full build
+    needs: reconcile_lockfile
+    if: always() && (needs.reconcile_lockfile.result == 'success' || needs.reconcile_lockfile.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout validated source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.reconcile_lockfile.outputs.head_sha || github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Record toolchain versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Install exactly from committed lockfile
+        run: npm ci --no-audit --no-fund
+
+      - name: Run TypeScript check
+        run: npm run lint
+
+      - name: Build frontend and Express server
+        run: npm run build
+
+      - name: Smoke-test local Express and Vite startup
+        run: |
+          set -euo pipefail
+          npm run dev > /tmp/mauritop-dev-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 30); do
+            status_code="$(curl --silent --output /tmp/mauritop-diagnostic.json --write-out '%{http_code}' http://127.0.0.1:3000/api/diagnostic/firebase-admin 2>/dev/null || true)"
+            if [ "$status_code" = "200" ]; then
+              node -e "const x = require('/tmp/mauritop-diagnostic.json'); if (!['ready', 'unconfigured'].includes(x.status) || !x.targetProject) process.exit(1)"
+              homepage_code="$(curl --silent --output /tmp/mauritop-home.html --write-out '%{http_code}' http://127.0.0.1:3000/ 2>/dev/null || true)"
+              if [ "$homepage_code" = "200" ]; then
+                ready=1
+                break
+              fi
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat /tmp/mauritop-dev-server.log
+            echo "Express/Vite server did not respond to its diagnostic route and homepage."
+            exit 1
+          fi
+          cat /tmp/mauritop-dev-server.log
+
+      - name: Upload validated npm lockfile
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mauritop-phase1-npm-lockfile
+          path: package-lock.json
+          if-no-files-found: warn
+          retention-days: 7

@@ -7,7 +7,7 @@ import {
   Printer, ExternalLink, ChevronRight, AlertTriangle, ArrowLeft, RefreshCw
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { doc, onSnapshot, deleteDoc, addDoc, collection, serverTimestamp, updateDoc } from "firebase/firestore";
+import { doc, onSnapshot } from "firebase/firestore";
 import { db, auth } from "../lib/firebase";
 import { cn, formatMRU, formatDateSafe, haptic } from "../lib/utils";
 import { useToast } from "../contexts/ToastContext";
@@ -80,7 +80,9 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
   // Real-time Firestore sync when modal is open to reflect live changes
   useEffect(() => {
-    if (!isOpen || !order?.id) return;
+    // Guest order details come from the private server tracking-token API.
+    // Do not attempt a direct Firestore read for a guest order.
+    if (!isOpen || !order?.id || order?.isGuest === true) return;
 
     const unsub = onSnapshot(
       doc(db, "orders", order.id),
@@ -189,30 +191,35 @@ ${playerId ? `معرف اللاعب/الحساب: ${playerId}\n` : ""}المبل
     showToast(isArabic ? "تم نسخ ملخص الفاتورة بنجاح!" : "Résumé copié !", "success");
   };
 
-  // Admin Action Handlers (Direct Firestore updates under authenticated admin security rules)
+  // Admin status transitions always use the trusted server transaction.
   const executeServerStatusUpdate = async (newStatus: string, payload: { pinCode?: string; adminNote?: string; rejectionReason?: string }) => {
     if (adminState?.onUpdateStatus) {
       await adminState.onUpdateStatus(newStatus, payload);
       return;
     }
 
-    if (!orderId) return;
-
-    const updateData: any = {
-      status: newStatus,
-      adminNote: payload.adminNote || null,
-      rejectionReason: payload.rejectionReason || null,
-      updatedAt: serverTimestamp()
-    };
-
-    if (payload.pinCode) {
-      updateData.pinCode = payload.pinCode;
-    }
-    if (newStatus === "completed") {
-      updateData.completedAt = serverTimestamp();
+    if (!orderId || !auth.currentUser) {
+      throw new Error(isArabic ? "جلسة الإدارة غير متاحة" : "Session administrateur indisponible");
     }
 
-    await updateDoc(doc(db, "orders", orderId), updateData);
+    const idToken = await auth.currentUser.getIdToken();
+    const response = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}/status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`
+      },
+      body: JSON.stringify({
+        status: newStatus,
+        adminNote: payload.adminNote || "",
+        rejectionReason: payload.rejectionReason || "",
+        pinCode: payload.pinCode || ""
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || (isArabic ? "تعذر تحديث الطلب في الخادم" : "Impossible de mettre à jour la commande"));
+    }
   };
 
   const handleAdminAccept = async () => {

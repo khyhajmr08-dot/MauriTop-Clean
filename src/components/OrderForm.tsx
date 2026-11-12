@@ -29,6 +29,16 @@ import {
   subscribePaymentSettings 
 } from "../lib/paymentSettings";
 
+function createOrderAttemptId(): string {
+  if (typeof globalThis.crypto?.getRandomValues !== "function") {
+    throw new Error("المتصفح لا يدعم إنشاء رمز آمن للطلب. يرجى تحديث المتصفح.");
+  }
+  const bytes = new Uint8Array(18);
+  globalThis.crypto.getRandomValues(bytes);
+  const randomPart = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `att_${randomPart}`;
+}
+
 function getQuantity(service: Service | undefined, amount: number) {
   if (!service) return 0;
   if (!service.packages || service.packages.length === 0) {
@@ -135,10 +145,8 @@ export default function OrderForm({ preSelectedServiceId }: { preSelectedService
     isGuest?: boolean;
   } | null>(null);
 
-  // Stable cryptographic attempt ID generated once per order draft, reused on retries
-  const [attemptId, setAttemptId] = useState<string>(() => {
-    return 'att_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 12);
-  });
+  // Stable cryptographic attempt ID generated once per order draft, reused on retries.
+  const [attemptId, setAttemptId] = useState<string>(() => createOrderAttemptId());
   const [guestName, setGuestName] = useState("");
   const [guestEmail, setGuestEmail] = useState("");
 
@@ -482,11 +490,18 @@ export default function OrderForm({ preSelectedServiceId }: { preSelectedService
         return language === 'ar' ? "يرجى إدخال مبلغ صحيح" : "Veuillez entrer un montant valide";
       }
 
-      if (service.pricingMode === "range") {
-        const min = service.minAmountMru || 0;
-        const max = service.maxAmountMru || Infinity;
+      if (service.pricingMode === "range" || service.pricingMode === "custom") {
+        const min = Number(service.minAmountMru ?? service.minAmount ?? 0);
+        const max = Number(service.maxAmountMru ?? service.maxAmount ?? 0);
+        if (!Number.isSafeInteger(min) || min <= 0 || !Number.isSafeInteger(max) || max < min) {
+          return language === "ar"
+            ? "حدود السعر لهذه الخدمة غير مكتملة. يرجى مراجعة الإدارة."
+            : "Les limites de prix de ce service ne sont pas configurées.";
+        }
         if (numAmount < min || numAmount > max) {
-          return "المبلغ خارج النطاق المسموح";
+          return language === "ar"
+            ? `المبلغ يجب أن يكون بين ${min} و${max} MRU`
+            : `Le montant doit être compris entre ${min} et ${max} MRU`;
         }
       } else {
         if (service.minAmount && numAmount < service.minAmount) {
@@ -593,7 +608,7 @@ export default function OrderForm({ preSelectedServiceId }: { preSelectedService
     setMsg("");
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 40000);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
     try {
       const isQuoteMode = service.pricingMode === "quote";
@@ -637,15 +652,22 @@ export default function OrderForm({ preSelectedServiceId }: { preSelectedService
 
       setProcessingStatus(isArabic ? "جاري التحقق وتأكيد الطلب عبر الخادم..." : "Validation du serveur...");
 
-      // Get authenticated Firebase ID token if user is signed in
+      // A signed-in customer must never be silently downgraded to a guest request.
       let idToken: string | null = null;
       if (user) {
         try {
           idToken = await user.getIdToken();
         } catch (tokenErr) {
           console.warn("[Auth] Could not get fresh ID token:", tokenErr);
+          throw new Error(isArabic ? "تعذر التحقق من جلسة تسجيل الدخول. أعد تسجيل الدخول ثم حاول مجدداً." : "Impossible de vérifier votre session. Reconnectez-vous puis réessayez.");
+        }
+        if (!idToken) {
+          throw new Error(isArabic ? "جلسة تسجيل الدخول غير صالحة. أعد تسجيل الدخول ثم حاول مجدداً." : "Session invalide. Reconnectez-vous puis réessayez.");
         }
       }
+
+      // Start the timeout only for the order API request, not while the receipt is uploading.
+      timeoutId = setTimeout(() => controller.abort(), 40000);
 
       // Authoritative server order creation
       const response = await fetch("/api/orders", {
@@ -728,7 +750,7 @@ export default function OrderForm({ preSelectedServiceId }: { preSelectedService
       confetti({ particleCount: 200, spread: 80, origin: { y: 0.5 } });
 
       // Generate fresh attemptId for subsequent orders
-      setAttemptId('att_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 12));
+      setAttemptId(createOrderAttemptId());
 
       // Auto-redirect if authenticated user
       if (user) {

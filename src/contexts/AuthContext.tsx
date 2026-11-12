@@ -127,6 +127,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 (firebaseUser.email && ADMIN_EMAILS.includes(firebaseUser.email.toLowerCase().trim())) ||
                 ADMIN_UIDS.includes(firebaseUser.uid);
 
+              let initialReferrerId: string | null = null;
+              try {
+                const storedReferrerId = localStorage.getItem('referrerId');
+                if (storedReferrerId && storedReferrerId !== firebaseUser.uid) {
+                  initialReferrerId = storedReferrerId;
+                }
+              } catch {
+                // Browser storage may be unavailable; the account can still be created safely.
+              }
+
               const defaultProfile: UserProfile = {
                 uid: firebaseUser.uid,
                 name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
@@ -137,13 +147,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 referralsCount: 0,
                 referralEarnings: 0,
                 loyaltyPoints: 0,
-                reviewStatus: 'Active',
+                isReferralRewarded: false,
+                referredBy: initialReferrerId,
+                reviewStatus: 'Not Verified',
                 isVerified: false,
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
               };
 
-              setDoc(userDocRef, defaultProfile, { merge: true }).catch((err) => {
+              setDoc(userDocRef, defaultProfile, { merge: true }).catch(async (err) => {
+                // A stale referral ID must not leave a valid signed-in account without a profile.
+                if (defaultProfile.referredBy) {
+                  const fallbackProfile = { ...defaultProfile, referredBy: null };
+                  try {
+                    await setDoc(userDocRef, fallbackProfile, { merge: true });
+                    setProfile(fallbackProfile);
+                    try { localStorage.removeItem('referrerId'); } catch { /* ignore */ }
+                    return;
+                  } catch (fallbackErr) {
+                    console.warn('[Auth] Profile initialization fallback failed:', fallbackErr);
+                  }
+                }
                 console.warn('[Auth] Failed to initialize user document:', err);
               });
 

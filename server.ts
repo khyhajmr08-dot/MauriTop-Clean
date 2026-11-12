@@ -5,6 +5,7 @@ import { GoogleGenAI } from "@google/genai";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
 import { initializeApp, applicationDefault, getApps, App } from "firebase-admin/app";
 import * as admin from "firebase-admin";
 import crypto from "crypto";
@@ -217,68 +218,137 @@ async function startServer() {
   app.use(express.json({ limit: "20mb" }));
   app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
-  // Serve persistent uploads statically in both dev and production
-  const uploadsDir = path.join(process.cwd(), "public", "uploads");
-  if (!fs.existsSync(uploadsDir)) {
-    try {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    } catch (e) {
-      console.warn("[Uploads] Directory creation warning:", e);
-    }
-  }
-  app.use("/uploads", express.static(uploadsDir));
-
-  // Resilient File/Image Upload Endpoint (Seamless fallback when Cloud Storage bucket is unprovisioned)
+  // Durable upload endpoint: always writes to the configured Firebase Storage bucket.
+  // The local filesystem is intentionally not used because serverless instances are ephemeral.
   app.post("/api/upload", async (req, res) => {
     try {
-      const { data, path: desiredPath, filename } = req.body;
-      if (!data || typeof data !== "string") {
-        return res.status(400).json({ error: "DATA_REQUIRED", message: "بيانات الصورة مطلوبة" });
+      const body = req.body || {};
+      const data = body.data;
+      const requestedPath = body.path;
+
+      if (typeof data !== "string" || typeof requestedPath !== "string") {
+        return res.status(400).json({ error: "DATA_REQUIRED", message: "بيانات الصورة ومسار التخزين مطلوبان" });
       }
 
-      // Parse data URL: data:image/png;base64,....
-      const matches = data.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-      let buffer: Buffer;
-      let extension = "webp";
-
-      if (matches && matches.length === 3) {
-        const mimeType = matches[1];
-        if (mimeType.includes("jpeg") || mimeType.includes("jpg")) extension = "jpg";
-        else if (mimeType.includes("png")) extension = "png";
-        else if (mimeType.includes("webp")) extension = "webp";
-        else if (mimeType.includes("gif")) extension = "gif";
-        buffer = Buffer.from(matches[2], "base64");
-      } else {
-        buffer = Buffer.from(data, "base64");
+      const pathParts = requestedPath.split("/");
+      if (pathParts.length !== 2) {
+        return res.status(400).json({ error: "INVALID_UPLOAD_PATH", message: "مسار رفع الملف غير صالح" });
       }
 
-      if (buffer.length === 0) {
-        return res.status(400).json({ error: "EMPTY_FILE", message: "الملف فارغ" });
+      const folder = pathParts[0];
+      const requestedName = pathParts[1];
+      const allowedFolders = ["services", "posts", "receipts", "kyc"];
+      if (!allowedFolders.includes(folder) || !/^[A-Za-z0-9_-]{1,140}\.(?:webp|jpe?g|png|gif)$/i.test(requestedName)) {
+        return res.status(400).json({ error: "INVALID_UPLOAD_PATH", message: "نوع أو اسم مسار الملف غير مسموح" });
       }
 
-      // Max 10MB limit for safe storage
-      if (buffer.length > 10 * 1024 * 1024) {
-        return res.status(413).json({ error: "FILE_TOO_LARGE", message: "حجم الملف يتجاوز الحد المسموح به (10 ميجابايت)" });
+      const matches = data.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=\r\n]+)$/i);
+      if (!matches) {
+        return res.status(415).json({ error: "UNSUPPORTED_FILE_TYPE", message: "يسمح فقط بصور JPEG وPNG وWEBP وGIF" });
       }
 
-      const randomSuffix = crypto.randomBytes(8).toString("hex");
-      let cleanBaseName = filename ? path.basename(filename, path.extname(filename)).replace(/[^a-zA-Z0-9_-]/g, "_") : "img";
-      if (desiredPath) {
-        const cleanDesired = path.basename(desiredPath, path.extname(desiredPath)).replace(/[^a-zA-Z0-9_-]/g, "_");
-        if (cleanDesired) cleanBaseName = cleanDesired;
+      const mimeType = matches[1].toLowerCase();
+      const base64Payload = matches[2].replace(/\s/g, "");
+      const buffer = Buffer.from(base64Payload, "base64");
+      if (!buffer.length || buffer.toString("base64").replace(/=+$/, "") !== base64Payload.replace(/=+$/, "")) {
+        return res.status(400).json({ error: "INVALID_FILE_DATA", message: "بيانات الصورة غير مكتملة أو غير صالحة" });
       }
 
-      const finalFileName = `${cleanBaseName}_${Date.now()}_${randomSuffix}.${extension}`;
-      const filePath = path.join(uploadsDir, finalFileName);
+      const maxBytes = 8 * 1024 * 1024;
+      if (buffer.length > maxBytes) {
+        return res.status(413).json({ error: "FILE_TOO_LARGE", message: "الحد الأقصى لحجم الصورة هو 8 ميجابايت" });
+      }
 
-      await fs.promises.writeFile(filePath, buffer);
-      const publicUrl = `/uploads/${finalFileName}`;
-      console.log(`[Upload] Resilient file saved to: ${publicUrl} (${buffer.length} bytes)`);
+      const hasSignature = (
+        (mimeType === "image/jpeg" && buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) ||
+        (mimeType === "image/png" && buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) ||
+        (mimeType === "image/webp" && buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") ||
+        (mimeType === "image/gif" && buffer.length >= 6 && /^GIF8[79]a$/.test(buffer.toString("ascii", 0, 6)))
+      );
+      if (!hasSignature) {
+        return res.status(415).json({ error: "FILE_SIGNATURE_MISMATCH", message: "محتوى الملف لا يطابق نوع الصورة المعلن" });
+      }
 
-      return res.json({ success: true, url: publicUrl, size: buffer.length });
+      // Receipts may be attached by guests. Every other folder requires a verified Firebase identity.
+      const tokenSupplied = hasSuppliedAuthToken(req);
+      const decoded = await verifyAuthToken(req);
+      if (tokenSupplied && !decoded) {
+        return res.status(401).json({ error: "TOKEN_INVALID", message: "انتهت صلاحية الجلسة. يرجى تسجيل الدخول مجدداً." });
+      }
+
+      if (folder !== "receipts" && !decoded) {
+        return res.status(401).json({ error: "AUTH_REQUIRED", message: "يجب تسجيل الدخول قبل رفع هذا الملف" });
+      }
+
+      if (folder === "kyc") {
+        if (!decoded || !requestedName.startsWith(`${decoded.uid}_`)) {
+          return res.status(403).json({ error: "UPLOAD_FORBIDDEN", message: "لا يمكنك رفع مستندات تخص حساباً آخر" });
+        }
+      }
+
+      if (folder === "services" || folder === "posts") {
+        if (!decoded) {
+          return res.status(401).json({ error: "AUTH_REQUIRED", message: "تسجيل دخول الإدارة مطلوب" });
+        }
+        if (!isOwnerUser(decoded)) {
+          const firestore = getDb();
+          const [staffSnap, userSnap] = await Promise.all([
+            firestore.collection("staff").doc(decoded.uid).get(),
+            firestore.collection("users").doc(decoded.uid).get()
+          ]);
+          const staffRole = staffSnap.exists && staffSnap.data()?.active === true ? staffSnap.data()?.role : null;
+          const userData = userSnap.exists ? userSnap.data() : {};
+          const userRole = userData?.staffRole || userData?.role;
+          const allowedStaffRoles = folder === "services"
+            ? ["admin", "services_manager", "catalog"]
+            : ["admin", "services_manager", "content_manager", "content", "catalog"];
+          if (!allowedStaffRoles.includes(staffRole) && !allowedStaffRoles.includes(userRole)) {
+            return res.status(403).json({ error: "UPLOAD_FORBIDDEN", message: "ليست لديك صلاحية رفع ملفات الإدارة" });
+          }
+        }
+      }
+
+      if (!adminApp || adminInitStatus !== "initialized") {
+        return res.status(503).json({ error: "STORAGE_BACKEND_UNAVAILABLE", message: "التخزين السحابي غير مهيأ على الخادم. يرجى المحاولة لاحقاً." });
+      }
+
+      const bucketName = firebaseConfig.storageBucket;
+      if (!bucketName) {
+        return res.status(503).json({ error: "STORAGE_BUCKET_NOT_CONFIGURED", message: "لم يتم ضبط حاوية تخزين Firebase لهذا المشروع" });
+      }
+
+      const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/png" ? "png" : mimeType === "image/gif" ? "gif" : "webp";
+      const requestedBase = requestedName.replace(/\.[^.]+$/, "");
+      const safeBase = requestedBase.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 100) || "image";
+      const randomSuffix = crypto.randomBytes(12).toString("hex");
+      const finalFileName = `${safeBase}_${Date.now()}_${randomSuffix}.${extension}`;
+      const objectPath = `${folder}/${finalFileName}`;
+      const downloadToken = crypto.randomUUID();
+      const bucket = getStorage(adminApp).bucket(bucketName);
+      const fileRef = bucket.file(objectPath);
+
+      await fileRef.save(buffer, {
+        resumable: false,
+        metadata: {
+          contentType: mimeType,
+          cacheControl: folder === "services" || folder === "posts" ? "public, max-age=31536000, immutable" : "private, no-store",
+          metadata: {
+            firebaseStorageDownloadTokens: downloadToken,
+            uploadedBy: decoded?.uid || "guest",
+            uploadedAt: new Date().toISOString()
+          }
+        }
+      });
+
+      const encodedObjectPath = encodeURIComponent(objectPath);
+      const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodedObjectPath}?alt=media&token=${downloadToken}`;
+      return res.json({ success: true, url: downloadUrl, size: buffer.length, storage: "firebase" });
     } catch (err: any) {
-      console.error("[Upload Error]:", err);
-      return res.status(500).json({ error: "UPLOAD_FAILED", message: err.message || "فشل حفظ الملف على الخادم" });
+      console.error("[Upload Error]:", err?.message || err);
+      if (err?.code === 7 || err?.code === 403 || err?.code === 404) {
+        return res.status(503).json({ error: "STORAGE_ACCESS_FAILED", message: "تعذر الوصول إلى حاوية التخزين. تحقق الإدارة من إعدادات Firebase Storage." });
+      }
+      return res.status(500).json({ error: "UPLOAD_FAILED", message: "فشل حفظ الصورة في التخزين السحابي" });
     }
   });
 
@@ -385,38 +455,378 @@ async function startServer() {
   // Maintenance Middleware for Order Endpoints (Resilient check with REST fallback)
   const checkMaintenance = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     try {
-      let isMaintenance = false;
-      try {
-        const firestore = getDb();
-        const settingsDoc = await firestore.collection("settings").doc("global").get();
-        if (settingsDoc.exists) {
-          isMaintenance = settingsDoc.data()?.maintenanceMode === true;
-        }
-      } catch (adminErr) {
-        // Fallback to REST check with API key
-        const globalData = await getDocRest("settings", "global");
-        if (globalData) {
-          isMaintenance = globalData.maintenanceMode === true;
-        }
-      }
+      const firestore = getDb();
+      const settingsDoc = await firestore.collection("settings").doc("global").get();
+      const isMaintenance = settingsDoc.exists && settingsDoc.data()?.maintenanceMode === true;
 
       if (isMaintenance) {
-        // Allow owner to bypass maintenance
         const decoded = await verifyAuthToken(req);
-        if (decoded && isOwnerUser(decoded)) {
-          return next();
-        }
+        if (decoded && isOwnerUser(decoded)) return next();
         return res.status(503).json({
           error: "MAINTENANCE_MODE",
           message: "المنصة قيد الصيانة المجدولة حالياً لتحسين الخدمات. لا يمكن قبول طلبات جديدة في الوقت الحالي."
         });
       }
       return next();
-    } catch (err) {
-      console.warn("[Maintenance Check] Pass-through on error:", err);
-      return next();
+    } catch (err: any) {
+      console.error("[Maintenance Check] Could not verify platform status:", err?.message || err);
+      return res.status(503).json({
+        error: "MAINTENANCE_STATUS_UNAVAILABLE",
+        message: "تعذر التحقق من حالة المنصة حالياً. لم يتم قبول الطلب، يرجى المحاولة لاحقاً."
+      });
     }
   };
+
+  // Server-authoritative reward withdrawal request. The balance deduction and request creation are atomic.
+  app.post("/api/withdrawals", async (req, res) => {
+    try {
+      const decoded = await verifyAuthToken(req);
+      if (!decoded) {
+        return res.status(401).json({ error: "UNAUTHORIZED", message: "يرجى تسجيل الدخول قبل طلب سحب الأرباح" });
+      }
+
+      const amount = Number(req.body?.amount);
+      const bankilyPhone = String(req.body?.bankilyPhone || "").replace(/\D/g, "").slice(-8);
+      if (!Number.isSafeInteger(amount) || amount < 500) {
+        return res.status(400).json({ error: "INVALID_WITHDRAWAL_AMOUNT", message: "الحد الأدنى للسحب هو 500 أوقية جديدة" });
+      }
+      if (!/^\d{8}$/.test(bankilyPhone)) {
+        return res.status(400).json({ error: "INVALID_WITHDRAWAL_PHONE", message: "يرجى إدخال رقم بنكيلي صحيح مكوّن من 8 أرقام" });
+      }
+
+      const firestore = getDb();
+      const userRef = firestore.collection("users").doc(decoded.uid);
+      const withdrawalLockRef = firestore.collection("withdrawal_locks").doc(decoded.uid);
+      const legacyUserWithdrawals = firestore.collection("withdrawals")
+        .where("userId", "==", decoded.uid);
+
+      const result = await firestore.runTransaction(async (transaction) => {
+        const [userSnap, lockSnap, previousWithdrawalsSnap] = await Promise.all([
+          transaction.get(userRef),
+          transaction.get(withdrawalLockRef),
+          transaction.get(legacyUserWithdrawals)
+        ]);
+        if (!userSnap.exists) throw new Error("WITHDRAWAL_USER_NOT_FOUND");
+        const userData = userSnap.data() || {};
+        if (userData.blocked === true) throw new Error("WITHDRAWAL_USER_BLOCKED");
+
+        const hasPendingLock = lockSnap.exists && lockSnap.data()?.status === "pending";
+        const hasLegacyPending = previousWithdrawalsSnap.docs.some((withdrawal) => withdrawal.data()?.status === "pending");
+        if (hasPendingLock || hasLegacyPending) throw new Error("WITHDRAWAL_ALREADY_PENDING");
+
+        const currentPoints = Number(userData.loyaltyPoints || 0);
+        if (!Number.isSafeInteger(currentPoints) || currentPoints < amount) {
+          throw new Error("WITHDRAWAL_INSUFFICIENT_POINTS");
+        }
+
+        const withdrawalRef = firestore.collection("withdrawals").doc();
+        transaction.update(userRef, {
+          loyaltyPoints: currentPoints - amount,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        transaction.set(withdrawalRef, {
+          userId: decoded.uid,
+          userName: userData.name || decoded.name || decoded.email?.split("@")[0] || "مستخدم",
+          userEmail: userData.email || decoded.email || "",
+          amount,
+          bankilyPhone,
+          status: "pending",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          adminNote: ""
+        });
+        transaction.set(withdrawalLockRef, {
+          withdrawalId: withdrawalRef.id,
+          status: "pending",
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        return { withdrawalId: withdrawalRef.id, remainingPoints: currentPoints - amount };
+      });
+
+      return res.status(201).json({ success: true, ...result });
+    } catch (err: any) {
+      if (err.message === "WITHDRAWAL_USER_NOT_FOUND") {
+        return res.status(404).json({ error: err.message, message: "ملف المستخدم غير موجود" });
+      }
+      if (err.message === "WITHDRAWAL_USER_BLOCKED") {
+        return res.status(403).json({ error: err.message, message: "الحساب محظور من طلب سحب الأرباح" });
+      }
+      if (err.message === "WITHDRAWAL_ALREADY_PENDING") {
+        return res.status(409).json({ error: err.message, message: "لديك طلب سحب قيد المراجعة بالفعل" });
+      }
+      if (err.message === "WITHDRAWAL_INSUFFICIENT_POINTS") {
+        return res.status(400).json({ error: err.message, message: "رصيد المكافآت غير كافٍ لإتمام هذا السحب" });
+      }
+      console.error("[Withdrawal Request Error]:", err?.message || err);
+      return res.status(503).json({ error: "WITHDRAWAL_UNAVAILABLE", message: "تعذر إنشاء طلب السحب حالياً. لم يتم خصم أي رصيد." });
+    }
+  });
+
+  // KYC review is performed by trusted server transactions; users and staff cannot self-verify accounts.
+  app.post("/api/admin/kyc/:userId/status", async (req, res) => {
+    try {
+      const decoded = await verifyAuthToken(req);
+      if (!decoded) {
+        return res.status(401).json({ error: "UNAUTHORIZED", message: "تسجيل الدخول الإداري مطلوب" });
+      }
+
+      const firestore = getDb();
+      if (!isOwnerUser(decoded)) {
+        const [staffSnap, userRoleSnap] = await Promise.all([
+          firestore.collection("staff").doc(decoded.uid).get(),
+          firestore.collection("users").doc(decoded.uid).get()
+        ]);
+        const staffRole = staffSnap.exists && staffSnap.data()?.active === true ? staffSnap.data()?.role : null;
+        const userRole = userRoleSnap.exists ? userRoleSnap.data()?.role : null;
+        if (!["orders_manager", "orders", "admin"].includes(staffRole) && userRole !== "admin") {
+          return res.status(403).json({ error: "FORBIDDEN", message: "ليست لديك صلاحية مراجعة طلبات التوثيق" });
+        }
+      }
+
+      const targetStatus = String(req.body?.status || "").toLowerCase();
+      const reason = String(req.body?.reason || "").trim();
+      if (!["approved", "rejected"].includes(targetStatus)) {
+        return res.status(400).json({ error: "INVALID_KYC_STATUS", message: "حالة التوثيق المطلوبة غير صالحة" });
+      }
+      if (targetStatus === "rejected" && !reason) {
+        return res.status(400).json({ error: "KYC_REJECTION_REASON_REQUIRED", message: "سبب رفض التوثيق إلزامي" });
+      }
+
+      const targetUid = String(req.params.userId || "");
+      if (!/^[A-Za-z0-9_-]{8,128}$/.test(targetUid)) {
+        return res.status(400).json({ error: "INVALID_USER_ID", message: "معرف المستخدم غير صالح" });
+      }
+
+      const userRef = firestore.collection("users").doc(targetUid);
+      const requestRef = firestore.collection("kyc_requests").doc(targetUid);
+      const reviewerIdentifier = decoded.email || decoded.uid;
+      const reviewerName = decoded.name || decoded.email?.split("@")[0] || "إدارة MAURITOP";
+      const now = admin.firestore.FieldValue.serverTimestamp();
+
+      await firestore.runTransaction(async (transaction) => {
+        const [userSnap, requestSnap] = await Promise.all([
+          transaction.get(userRef),
+          transaction.get(requestRef)
+        ]);
+        if (!userSnap.exists) throw new Error("KYC_USER_NOT_FOUND");
+
+        const userData = userSnap.data() || {};
+        const fullName = String(userData.kyc_full_name || "").trim();
+        const phoneDigits = String(userData.kyc_phone || "").replace(/[^0-9]/g, "");
+        const idNumber = String(userData.kyc_id_number || "").trim();
+        const idType = String(userData.kyc_id_type || "").trim();
+        const city = String(userData.kyc_city || "").trim();
+        const address = String(userData.kyc_address_gps || "").trim();
+        const imageUrl = String(userData.kyc_id_image || "").trim();
+        if (
+          fullName.split(/\s+/).filter(Boolean).length < 2 ||
+          phoneDigits.length < 8 ||
+          !idNumber ||
+          !["national_id", "passport"].includes(idType) ||
+          !city ||
+          !address ||
+          !userData.kyc_submitted_at ||
+          userData.reviewStatus !== "Under Review" ||
+          userData.kyc_completed === true
+        ) {
+          throw new Error("KYC_SUBMISSION_INCOMPLETE");
+        }
+
+        // Verify the uploaded identity document exists in this user's KYC folder and its token matches.
+        try {
+          const imageUrlParsed = new URL(imageUrl);
+          const bucketPrefix = `/v0/b/${firebaseConfig.storageBucket}/o/`;
+          const objectName = imageUrlParsed.pathname.startsWith(bucketPrefix)
+            ? decodeURIComponent(imageUrlParsed.pathname.slice(bucketPrefix.length))
+            : "";
+          const downloadToken = imageUrlParsed.searchParams.get("token") || "";
+          if (
+            imageUrlParsed.origin !== "https://firebasestorage.googleapis.com" ||
+            !objectName.startsWith(`kyc/${targetUid}_`) ||
+            imageUrlParsed.searchParams.get("alt") !== "media" ||
+            !downloadToken ||
+            !firebaseConfig.storageBucket
+          ) {
+            throw new Error("KYC_IMAGE_URL_INVALID");
+          }
+
+          const imageFile = getStorage(adminApp).bucket(firebaseConfig.storageBucket).file(objectName);
+          const [imageMetadata] = await imageFile.getMetadata();
+          const downloadTokens = String(imageMetadata.metadata?.firebaseStorageDownloadTokens || "")
+            .split(",")
+            .map((value: string) => value.trim())
+            .filter(Boolean);
+          if (!String(imageMetadata.contentType || "").startsWith("image/") || !downloadTokens.includes(downloadToken)) {
+            throw new Error("KYC_IMAGE_METADATA_INVALID");
+          }
+        } catch (imageError) {
+          throw new Error("KYC_IMAGE_INVALID");
+        }
+
+        const approved = targetStatus === "approved";
+        const reviewStatus = approved ? "Active" : "Rejected";
+        const userUpdates: Record<string, any> = {
+          reviewStatus,
+          isVerified: approved,
+          kyc_completed: approved,
+          reviewedBy: reviewerIdentifier,
+          reviewedByName: reviewerName,
+          reviewedAt: now,
+          updatedAt: now,
+          blockReason: approved ? "" : reason
+        };
+        if (approved) userUpdates.verifiedAt = now;
+
+        transaction.update(userRef, userUpdates);
+        transaction.set(requestRef, {
+          userId: targetUid,
+          reviewStatus: approved ? "Active" : "Rejected",
+          status: targetStatus,
+          isVerified: approved,
+          kyc_completed: approved,
+          reviewedBy: reviewerIdentifier,
+          reviewedByName: reviewerName,
+          reviewedAt: now,
+          blockReason: approved ? "" : reason,
+          updatedAt: now
+        }, { merge: true });
+
+        const notificationRef = firestore.collection("notifications").doc();
+        transaction.set(notificationRef, {
+          userId: targetUid,
+          title: approved ? "تهانينا! تم توثيق حسابك بنجاح" : "تنبيه بخصوص طلب توثيق الحساب",
+          body: approved
+            ? "قامت إدارة منصة موري توب بمراجعة وثائق الهوية وتوثيق حسابك رسمياً."
+            : `تعذر قبول طلب التوثيق بالبيانات الحالية. السبب: ${reason}. يرجى مراجعة الطلب وإعادة رفع وثيقة واضحة.`,
+          read: false,
+          type: approved ? "success" : "error",
+          createdAt: now
+        });
+
+        const auditRef = firestore.collection("audit_logs").doc();
+        transaction.set(auditRef, {
+          action: approved ? "KYC_APPROVED" : "KYC_REJECTED",
+          targetUserId: targetUid,
+          targetUserEmail: userData.email || "",
+          reason: approved ? "" : reason,
+          performedBy: reviewerIdentifier,
+          performedByName: reviewerName,
+          timestamp: now
+        });
+      });
+
+      return res.json({ success: true, status: targetStatus });
+    } catch (err: any) {
+      if (err.message === "KYC_USER_NOT_FOUND") {
+        return res.status(404).json({ error: err.message, message: "ملف المستخدم غير موجود" });
+      }
+      if (err.message === "KYC_SUBMISSION_INCOMPLETE") {
+        return res.status(409).json({ error: err.message, message: "بيانات طلب التوثيق غير مكتملة أو لم تُرسل من النموذج المعتمد" });
+      }
+      if (err.message === "KYC_IMAGE_INVALID") {
+        return res.status(409).json({ error: err.message, message: "تعذر التحقق من صورة وثيقة الهوية المحفوظة في التخزين السحابي" });
+      }
+      console.error("[KYC Review Error]:", err?.message || err);
+      return res.status(503).json({ error: "KYC_REVIEW_UNAVAILABLE", message: "تعذرت معالجة طلب التوثيق حالياً. لم يتم تأكيد أي تغيير." });
+    }
+  });
+
+  // Owner-only withdrawal approval/rejection. Rejections refund the held balance exactly once.
+  app.post("/api/admin/withdrawals/:withdrawalId/status", async (req, res) => {
+    try {
+      const decoded = await verifyAuthToken(req);
+      if (!decoded) {
+        return res.status(401).json({ error: "UNAUTHORIZED", message: "تسجيل الدخول الإداري مطلوب" });
+      }
+      const firestore = getDb();
+      if (!isOwnerUser(decoded)) {
+        const [staffSnap, userSnap] = await Promise.all([
+          firestore.collection("staff").doc(decoded.uid).get(),
+          firestore.collection("users").doc(decoded.uid).get()
+        ]);
+        const staffRole = staffSnap.exists && staffSnap.data()?.active === true ? staffSnap.data()?.role : null;
+        const userRole = userSnap.exists ? userSnap.data()?.role : null;
+        if (!["admin", "finance", "finance_manager"].includes(staffRole) && userRole !== "admin") {
+          return res.status(403).json({ error: "FORBIDDEN", message: "ليست لديك صلاحية إدارة طلبات السحب" });
+        }
+      }
+
+      const targetStatus = String(req.body?.status || "").toLowerCase();
+      const adminNote = String(req.body?.adminNote || "").trim();
+      if (!["approved", "rejected"].includes(targetStatus)) {
+        return res.status(400).json({ error: "INVALID_WITHDRAWAL_STATUS", message: "حالة طلب السحب غير صالحة" });
+      }
+      if (targetStatus === "rejected" && !adminNote) {
+        return res.status(400).json({ error: "REJECTION_REASON_REQUIRED", message: "سبب رفض طلب السحب إلزامي" });
+      }
+
+      const withdrawalRef = firestore.collection("withdrawals").doc(req.params.withdrawalId);
+      const result = await firestore.runTransaction(async (transaction) => {
+        const withdrawalSnap = await transaction.get(withdrawalRef);
+        if (!withdrawalSnap.exists) throw new Error("WITHDRAWAL_NOT_FOUND");
+        const withdrawal = withdrawalSnap.data() || {};
+        if (withdrawal.status !== "pending") throw new Error("WITHDRAWAL_ALREADY_PROCESSED");
+
+        const withdrawalLockRef = firestore.collection("withdrawal_locks").doc(String(withdrawal.userId || ""));
+        const withdrawalLockSnap = await transaction.get(withdrawalLockRef);
+
+        if (targetStatus === "rejected") {
+          const userRef = firestore.collection("users").doc(String(withdrawal.userId || ""));
+          const userSnap = await transaction.get(userRef);
+          if (!userSnap.exists) throw new Error("WITHDRAWAL_USER_NOT_FOUND");
+          const currentPoints = Number(userSnap.data()?.loyaltyPoints || 0);
+          const amount = Number(withdrawal.amount || 0);
+          if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error("WITHDRAWAL_AMOUNT_INVALID");
+          transaction.update(userRef, {
+            loyaltyPoints: currentPoints + amount,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        }
+
+        transaction.update(withdrawalRef, {
+          status: targetStatus,
+          adminNote: targetStatus === "rejected" ? adminNote : "",
+          processedBy: decoded.uid,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        if (withdrawalLockSnap.exists && withdrawalLockSnap.data()?.withdrawalId === withdrawalSnap.id) {
+          transaction.delete(withdrawalLockRef);
+        }
+
+        const notificationRef = firestore.collection("notifications").doc();
+        transaction.set(notificationRef, {
+          userId: withdrawal.userId,
+          title: targetStatus === "approved" ? "تم سحب الأرباح بنجاح" : "تم رفض طلب سحب الأرباح",
+          body: targetStatus === "approved"
+            ? `تمت الموافقة على تحويل مبلغ ${withdrawal.amount} أوقية إلى حساب بنكيلي المنتهي بـ ${String(withdrawal.bankilyPhone || "").slice(-4)}.`
+            : `تم رفض طلب السحب وإعادة ${withdrawal.amount} أوقية إلى رصيدك. السبب: ${adminNote}`,
+          read: false,
+          type: targetStatus === "approved" ? "success" : "error",
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        return { success: true, status: targetStatus, refunded: targetStatus === "rejected" };
+      });
+
+      return res.json(result);
+    } catch (err: any) {
+      if (err.message === "WITHDRAWAL_NOT_FOUND") {
+        return res.status(404).json({ error: err.message, message: "طلب السحب غير موجود" });
+      }
+      if (err.message === "WITHDRAWAL_ALREADY_PROCESSED") {
+        return res.status(409).json({ error: err.message, message: "تمت معالجة طلب السحب مسبقاً" });
+      }
+      if (err.message === "WITHDRAWAL_USER_NOT_FOUND") {
+        return res.status(409).json({ error: err.message, message: "لا يمكن استرجاع الرصيد لأن ملف المستخدم غير موجود" });
+      }
+      if (err.message === "WITHDRAWAL_AMOUNT_INVALID") {
+        return res.status(409).json({ error: err.message, message: "قيمة طلب السحب المخزنة غير صالحة" });
+      }
+      console.error("[Withdrawal Processing Error]:", err?.message || err);
+      return res.status(503).json({ error: "WITHDRAWAL_PROCESSING_UNAVAILABLE", message: "تعذرت معالجة طلب السحب حالياً، لم يتم تأكيد أي تغيير." });
+    }
+  });
 
   // Secure Server-Authoritative Order Creation API (Supports Guests and Authenticated Users with Atomic Idempotency)
   app.post("/api/orders", checkMaintenance, async (req, res) => {
@@ -442,38 +852,153 @@ async function startServer() {
       }
 
       const clientAttemptId = attemptId.trim();
+      if (!/^[A-Za-z0-9_-]{8,128}$/.test(clientAttemptId)) {
+        return res.status(400).json({ error: "ATTEMPT_ID_INVALID", message: "رمز المحاولة يحتوي على أحرف غير مسموح بها" });
+      }
 
-      // Built-in catalog for standard services
+      let firestore: Firestore;
+      try {
+        firestore = getDb();
+      } catch (dbErr: any) {
+        console.error("[Order Creation] Admin Firestore is unavailable:", dbErr?.message || dbErr);
+        return res.status(503).json({
+          error: "ORDER_BACKEND_UNAVAILABLE",
+          message: "خدمة حفظ الطلبات غير جاهزة حالياً. لم يتم تسجيل طلبك، يرجى المحاولة لاحقاً."
+        });
+      }
+
+      // Server-side fallback catalog mirrors the current public SERVICES catalog.
+      // Firestore records override these defaults whenever an administrator has customized a service.
       const defaultServices: Record<string, any> = {
         pubg: {
-          name: "PUBG Mobile",
-          nameAr: "شحن شدات ببجي موبايل (PUBG UC)",
-          status: "active",
-          pricingMode: "packages",
+          name: "PUBG Mobile", nameAr: "شحن شدات ببجي موبايل (PUBG UC)", status: "active", pricingMode: "package",
           packages: [
             { amount: 55, quantity: 60, title: "60 UC" },
             { amount: 240, quantity: 325, title: "325 UC" },
-            { amount: 470, quantity: 660, title: "660 UC" }
+            { amount: 470, quantity: 660, title: "660 UC" },
+            { amount: 1190, quantity: 1800, title: "1800 UC" },
+            { amount: 2290, quantity: 3850, title: "3850 UC" },
+            { amount: 4490, quantity: 8100, title: "8100 UC" }
           ],
-          fields: [{ id: "playerId", labelAr: "معرف اللاعب", required: true }]
+          fields: [
+            { id: "playerId", labelAr: "معرف اللاعب", required: true, pattern: "^[0-9]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
         },
         freefire: {
-          name: "Free Fire",
-          nameAr: "شحن جواهر فري فاير (Free Fire)",
-          status: "active",
-          pricingMode: "packages",
+          name: "Free Fire", nameAr: "شحن جواهر فري فاير (Free Fire)", status: "active", pricingMode: "package",
           packages: [
-            { amount: 50, quantity: 110, title: "110 جواهر" },
-            { amount: 100, quantity: 240, title: "240 جواهر" },
-            { amount: 150, quantity: 380, title: "380 جواهر" }
+            { amount: 45, quantity: 100, title: "100 جوهرة" },
+            { amount: 135, quantity: 310, title: "310 جوهرة" },
+            { amount: 220, quantity: 520, title: "520 جوهرة" },
+            { amount: 440, quantity: 1060, title: "1060 جوهرة" },
+            { amount: 880, quantity: 2180, title: "2180 جوهرة" }
           ],
-          fields: [{ id: "playerId", labelAr: "معرف اللاعب", required: true }]
+          fields: [
+            { id: "playerId", labelAr: "معرف اللاعب", required: true, pattern: "^[0-9]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
         },
+        "cod-mobile": {
+          name: "Call of Duty Mobile", nameAr: "شحن CP كول أوف ديوتي موبايل", status: "active", pricingMode: "package",
+          packages: [
+            { amount: 55, quantity: 80, title: "80 CP" },
+            { amount: 260, quantity: 420, title: "420 CP" },
+            { amount: 520, quantity: 880, title: "880 CP" }
+          ],
+          fields: [
+            { id: "playerId", labelAr: "معرف اللاعب", required: true, pattern: "^[0-9]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
+        },
+        "snapchat-plus": {
+          name: "Snapchat Plus", nameAr: "اشتراك سناب شات بلس (Snapchat+)", status: "active", pricingMode: "package",
+          packages: [
+            { amount: 250, quantity: 3, title: "اشتراك 3 أشهر" },
+            { amount: 490, quantity: 6, title: "اشتراك 6 أشهر" },
+            { amount: 990, quantity: 12, title: "اشتراك سنة كاملة (12 شهر)" }
+          ],
+          fields: [
+            { id: "username", labelAr: "اسم المستخدم", required: true },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
+        },
+        "tod-vip": {
+          name: "TOD VIP - 1 Mois", nameAr: "تود VIP - شهر واحد", status: "active", pricingMode: "fixed", priceMru: 180,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "shahid-vip": {
+          name: "Shahid VIP - 1 Mois", nameAr: "شاهد VIP - شهر واحد", status: "active", pricingMode: "fixed", priceMru: 150,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        netflix: {
+          name: "Netflix - 1 Mois", nameAr: "نتفليكس - شهر واحد", status: "active", pricingMode: "fixed", priceMru: 250,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "spotify-premium": {
+          name: "Spotify Premium - 1 Mois", nameAr: "سبوتيفاي بريميوم - شهر واحد", status: "active", pricingMode: "fixed", priceMru: 120,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "apple-10": {
+          name: "Apple Gift Card 10$ (US)", nameAr: "بطاقة آبل 10 دولار (متجر أمريكي US)", status: "active", pricingMode: "fixed", priceMru: 450,
+          packages: [{ amount: 450, quantity: 1, title: "بطاقة 10$ (متجر US)" }],
+          fields: [
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
+        },
+        "chatgpt-plus": {
+          name: "ChatGPT Plus", nameAr: "اشتراك شات جي بي تي بلس (ChatGPT Plus)", status: "active", pricingMode: "fixed", priceMru: 850,
+          packages: [{ amount: 850, quantity: 30, title: "اشتراك 30 يوماً" }],
+          fields: [
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+            { id: "phone", labelAr: "رقم الهاتف", required: true, pattern: "^[0-9]{8,15}$" }
+          ]
+        },
+        "apple-25": {
+          name: "Apple Gift Card 25$", nameAr: "بطاقة آبل 25 دولار", status: "active", pricingMode: "fixed", priceMru: 1250,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "playstation-10": {
+          name: "PlayStation Card 10$", nameAr: "بطاقة بلايستيشن 10 دولار", status: "active", pricingMode: "fixed", priceMru: 520,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "googleplay-10": {
+          name: "Google Play Card 10$", nameAr: "بطاقة جوجل بلاي 10 دولار", status: "active", pricingMode: "fixed", priceMru: 520,
+          fields: [{ id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "fb-ads": {
+          name: "Facebook Ads", nameAr: "إعلانات فيسبوك", status: "active", pricingMode: "range", minAmountMru: 100, maxAmountMru: 10000,
+          fields: [
+            { id: "pageLink", labelAr: "رابط الصفحة", required: true, pattern: "^https://.*$" },
+            { id: "budgetMru", labelAr: "الميزانية", required: true, pattern: "^[0-9]+$" },
+            { id: "objective", labelAr: "هدف الحملة", required: true },
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }
+          ]
+        },
+        "fb-verification": {
+          name: "Facebook Verification Help", nameAr: "مساعدة طلب توثيق فيسبوك", status: "active", pricingMode: "quote",
+          fields: [
+            { id: "profileLink", labelAr: "رابط الحساب", required: true, pattern: "^https://.*$" },
+            { id: "username", labelAr: "اسم المستخدم", required: true },
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }
+          ]
+        },
+        "icloud-service": {
+          name: "iCloud Service", nameAr: "خدمة آي كلاود", status: "active", pricingMode: "fixed", priceMru: 150,
+          fields: [{ id: "appleIdEmail", labelAr: "بريد Apple ID", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }]
+        },
+        "visa-recharge": {
+          name: "Visa Virtual Recharge", nameAr: "شحن فيزا افتراضية", status: "active", pricingMode: "range", minAmountMru: 100, maxAmountMru: 5000,
+          fields: [
+            { id: "cardId", labelAr: "رقم البطاقة", required: true, pattern: "^[0-9A-Za-z]+$" },
+            { id: "amountMru", labelAr: "المبلغ", required: true, pattern: "^[0-9]+$" },
+            { id: "email", labelAr: "البريد الإلكتروني", required: true, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }
+          ]
+        },
+        // Legacy built-in game services retained for records/catalog compatibility.
         mobilelegends: {
-          name: "Mobile Legends",
-          nameAr: "شحن ماسات موبايل ليجندز",
-          status: "active",
-          pricingMode: "packages",
+          name: "Mobile Legends", nameAr: "شحن ماسات موبايل ليجندز", status: "active", pricingMode: "packages",
           packages: [
             { amount: 50, quantity: 80, title: "80 ماسة" },
             { amount: 100, quantity: 160, title: "160 ماسة" }
@@ -481,10 +1006,7 @@ async function startServer() {
           fields: [{ id: "playerId", labelAr: "معرف اللاعب", required: true }]
         },
         fifa: {
-          name: "EA Sports FC",
-          nameAr: "نقاط FC Mobile (فيفا موبايل)",
-          status: "active",
-          pricingMode: "packages",
+          name: "EA Sports FC", nameAr: "نقاط FC Mobile (فيفا موبايل)", status: "active", pricingMode: "packages",
           packages: [
             { amount: 100, quantity: 500, title: "500 نقطة FC" },
             { amount: 200, quantity: 1200, title: "1200 نقطة FC" }
@@ -493,16 +1015,19 @@ async function startServer() {
         }
       };
 
+
       // 1. Fetch Trusted Service Configuration
       let serviceData: any = null;
+      let serviceHasDbRecord = false;
       try {
-        const firestore = getDb();
         const serviceDoc = await firestore.collection("services").doc(serviceId).get();
         if (serviceDoc.exists) {
           serviceData = serviceDoc.data();
+          serviceHasDbRecord = true;
         }
-      } catch {
-        serviceData = await getDocRest("services", serviceId);
+      } catch (serviceErr: any) {
+        console.error("[Order Creation] Service lookup failed:", serviceErr?.message || serviceErr);
+        return res.status(503).json({ error: "SERVICE_LOOKUP_UNAVAILABLE", message: "تعذر التحقق من الخدمة حالياً. يرجى المحاولة لاحقاً." });
       }
 
       if (!serviceData && defaultServices[serviceId]) {
@@ -527,24 +1052,27 @@ async function startServer() {
 
         let paymentMethods: any = null;
         try {
-          const firestore = getDb();
           const paymentSettingsDoc = await firestore.collection("settings").doc("payment_methods").get();
           paymentMethods = paymentSettingsDoc.exists ? paymentSettingsDoc.data()?.methods || paymentSettingsDoc.data() : null;
-        } catch {
-          const paymentData = await getDocRest("settings", "payment_methods");
-          paymentMethods = paymentData?.methods || paymentData;
+        } catch (paymentErr: any) {
+          console.error("[Order Creation] Payment settings lookup failed:", paymentErr?.message || paymentErr);
+          return res.status(503).json({ error: "PAYMENT_SETTINGS_UNAVAILABLE", message: "تعذر التحقق من طرق الدفع حالياً. لم يتم قبول الطلب." });
         }
 
-        if (!paymentMethods) {
-          paymentMethods = {
-            bankily: { enabled: true, labelAr: "بنكيلي", labelFr: "Bankily" },
-            sadad: { enabled: true, labelAr: "سداد", labelFr: "Sedad" },
-            masrvi: { enabled: true, labelAr: "مصرفي", labelFr: "Masrvi" },
-            gazapay: { enabled: true, labelAr: "غزة باي", labelFr: "GazaPay" }
-          };
-        }
+        // Merge partial saved settings with the same explicit defaults used by the customer UI.
+        // Explicit admin disable flags are preserved; unknown payment providers remain disabled.
+        const defaultPaymentMethods: Record<string, any> = {
+          bankily: { enabled: true, labelAr: "بنكيلي", labelFr: "Bankily" },
+          sadad: { enabled: true, labelAr: "سداد", labelFr: "Sedad" },
+          gaza: { enabled: false, labelAr: "غزة باي", labelFr: "GazaPay" },
+          paypal: { enabled: false, labelAr: "بايبال", labelFr: "PayPal" }
+        };
+        paymentMethods = {
+          ...defaultPaymentMethods,
+          ...(paymentMethods && typeof paymentMethods === "object" ? paymentMethods : {})
+        };
 
-        const methodConfig = paymentMethods ? paymentMethods[paymentMethod] : null;
+        const methodConfig = paymentMethods[paymentMethod] || null;
 
         if (!methodConfig) {
           return res.status(400).json({ error: "PAYMENT_METHOD_INVALID", message: "طريقة الدفع المحددة غير معروفة" });
@@ -558,50 +1086,60 @@ async function startServer() {
         }
       }
 
-      // 3. Compute and Validate Server-Authoritative Price
+      // 3. Compute and Validate the amount using trusted server-side configuration only.
       let finalAmount = 0;
       if (!isQuoteMode) {
         const parsedClientAmount = Number(requestedAmount);
-        if (isNaN(parsedClientAmount) || parsedClientAmount <= 0) {
-          return res.status(400).json({ error: "INVALID_AMOUNT", message: "المبلغ المطلوب غير صالح" });
+        if (!Number.isSafeInteger(parsedClientAmount) || parsedClientAmount <= 0) {
+          return res.status(400).json({ error: "INVALID_AMOUNT", message: "المبلغ المطلوب يجب أن يكون رقماً صحيحاً موجباً بالأوقية MRU" });
         }
 
-        // Check package constraints
-        const combinedPackages = [
-          ...(Array.isArray(serviceData.packages) ? serviceData.packages : []),
-          ...(defaultServices[serviceId]?.packages || [])
-        ];
+        // Use the server catalog only when no admin Firestore record exists.
+        // An explicit empty package list in Firestore must not be overridden by stale built-in packages.
+        const configuredPackages = Array.isArray(serviceData.packages)
+          ? serviceData.packages
+          : (!serviceHasDbRecord ? (defaultServices[serviceId]?.packages || []) : []);
+        const hasCustomBounds = serviceData.minAmountMru !== undefined || serviceData.minAmount !== undefined ||
+          serviceData.maxAmountMru !== undefined || serviceData.maxAmount !== undefined;
 
-        if (combinedPackages.length > 0 && !serviceData.allowCustomAmount) {
-          const validPackage = combinedPackages.find((p: any) => Number(p.amount) === parsedClientAmount);
+        if (pricingMode === "range" || pricingMode === "custom" || serviceData.allowCustomAmount === true) {
+          const rawMin = serviceData.minAmountMru ?? serviceData.minAmount;
+          const rawMax = serviceData.maxAmountMru ?? serviceData.maxAmount;
+          const min = Number(rawMin);
+          const max = Number(rawMax);
+          if (!hasCustomBounds || !Number.isSafeInteger(min) || min <= 0 || !Number.isSafeInteger(max) || max < min) {
+            return res.status(409).json({ error: "SERVICE_PRICING_NOT_CONFIGURED", message: "نطاق سعر هذه الخدمة غير مكتمل. يرجى مراجعة الإدارة قبل الشراء." });
+          }
+          if (parsedClientAmount < min || parsedClientAmount > max) {
+            return res.status(400).json({
+              error: "AMOUNT_OUT_OF_RANGE",
+              message: `المبلغ يجب أن يكون بين ${min} و ${max} MRU`
+            });
+          }
+          finalAmount = parsedClientAmount;
+        } else if (configuredPackages.length > 0) {
+          const validPackage = configuredPackages.find((p: any) => Number(p.amount) === parsedClientAmount);
           if (!validPackage) {
-            return res.status(400).json({ 
-              error: "INVALID_PACKAGE_PRICE", 
-              message: `المبلغ المطلوب (${parsedClientAmount} MRU) لا يتطابق مع أي من باقات الخدمة المتاحة.` 
+            return res.status(400).json({
+              error: "INVALID_PACKAGE_PRICE",
+              message: `المبلغ المطلوب (${parsedClientAmount} MRU) لا يتطابق مع باقات الخدمة الحالية.`
             });
           }
           finalAmount = parsedClientAmount;
         } else if (pricingMode === "fixed") {
-          const expectedPrice = Number(serviceData.priceMru || serviceData.suggestedPrice || serviceData.price || 0);
-          if (expectedPrice > 0 && parsedClientAmount !== expectedPrice) {
+          const expectedPrice = Number(serviceData.priceMru ?? serviceData.suggestedPrice ?? serviceData.price ?? 0);
+          if (!Number.isSafeInteger(expectedPrice) || expectedPrice <= 0) {
+            return res.status(409).json({ error: "SERVICE_PRICE_NOT_CONFIGURED", message: "لم يتم ضبط سعر صالح لهذه الخدمة. يرجى مراجعة الإدارة." });
+          }
+          if (parsedClientAmount !== expectedPrice) {
             return res.status(400).json({ error: "PRICE_MISMATCH", message: `سعر الخدمة الرسمي هو ${expectedPrice} MRU` });
           }
-          finalAmount = expectedPrice > 0 ? expectedPrice : parsedClientAmount;
-        } else if (pricingMode === "range") {
-          const min = Number(serviceData.minAmountMru || serviceData.minAmount || 0);
-          const max = Number(serviceData.maxAmountMru || serviceData.maxAmount || Infinity);
-          if (parsedClientAmount < min || parsedClientAmount > max) {
-            return res.status(400).json({ 
-              error: "AMOUNT_OUT_OF_RANGE", 
-              message: `المبلغ يجب أن يكون بين ${min} و ${max} MRU` 
-            });
-          }
-          finalAmount = parsedClientAmount;
+          finalAmount = expectedPrice;
         } else {
-          finalAmount = parsedClientAmount;
+          return res.status(409).json({ error: "UNSUPPORTED_PRICING_MODE", message: "طريقة تسعير هذه الخدمة غير مهيأة بشكل آمن. يرجى مراجعة الإدارة." });
         }
 
-        // Validate Receipt Proof for paid orders (Strict: no fake tokens or empty values)
+        // Paid orders must reference a completed Firebase Storage receipt upload.
         if (!proofImageUrl || typeof proofImageUrl !== "string" || proofImageUrl.trim() === "" || proofImageUrl === "receipt_attached") {
           return res.status(400).json({
             error: "RECEIPT_REQUIRED",
@@ -609,28 +1147,100 @@ async function startServer() {
           });
         }
 
-        const cleanProofUrl = proofImageUrl.trim();
-        if (!cleanProofUrl.startsWith("http") && !cleanProofUrl.startsWith("/uploads/")) {
+        try {
+          const receiptUrl = new URL(proofImageUrl.trim());
+          const bucketPrefix = `/v0/b/${firebaseConfig.storageBucket}/o/`;
+          const objectName = receiptUrl.pathname.startsWith(bucketPrefix)
+            ? decodeURIComponent(receiptUrl.pathname.slice(bucketPrefix.length))
+            : "";
+          const downloadToken = receiptUrl.searchParams.get("token") || "";
+          if (receiptUrl.origin !== "https://firebasestorage.googleapis.com" ||
+              !objectName.startsWith(`receipts/${clientAttemptId}_`) ||
+              receiptUrl.searchParams.get("alt") !== "media" ||
+              !downloadToken ||
+              !adminApp ||
+              !firebaseConfig.storageBucket) {
+            throw new Error("INVALID_RECEIPT_URL");
+          }
+
+          // Verify the uploaded receipt really exists, is an image, and owns the supplied download token.
+          const receiptFile = getStorage(adminApp).bucket(firebaseConfig.storageBucket).file(objectName);
+          const [receiptMetadata] = await receiptFile.getMetadata();
+          const storedTokens = String(receiptMetadata.metadata?.firebaseStorageDownloadTokens || "")
+            .split(",")
+            .map((value: string) => value.trim())
+            .filter(Boolean);
+          if (!String(receiptMetadata.contentType || "").startsWith("image/") || !storedTokens.includes(downloadToken)) {
+            throw new Error("INVALID_RECEIPT_METADATA");
+          }
+        } catch {
           return res.status(400).json({
             error: "INVALID_RECEIPT_URL",
-            message: "رابط إيصال الدفع غير صالح. يرجى إعادة رفع إيصال الدفع."
+            message: "تعذر التحقق من إيصال الدفع أو أنه لا يخص محاولة الطلب الحالية. يرجى إعادة رفع الإيصال."
           });
         }
       }
 
-      // 4. Validate Required Service Fields
+      // 4. Validate required service fields from the trusted Firestore record or the server catalog.
+      const fieldPatternById: Record<string, string> = {
+        playerId: "^[0-9]+$",
+        gameId: "^[0-9]+$",
+        email: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+        appleIdEmail: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+        phone: "^[0-9]{8,15}$",
+        amountMru: "^[0-9]+$",
+        budgetMru: "^[0-9]+$",
+        cardId: "^[0-9A-Za-z]+$",
+        pageLink: "^https://.*$",
+        profileLink: "^https://.*$"
+      };
+      const fallbackFields = defaultServices[serviceId]?.fields || [];
+      const declaredRequiredIds = Array.isArray(serviceData.requiredFields) ? serviceData.requiredFields : [];
+      const declaredOptionalIds = Array.isArray(serviceData.optionalFields) ? serviceData.optionalFields : [];
+      const declaredFieldIds = Array.from(new Set([...declaredRequiredIds, ...declaredOptionalIds]));
+      const serviceFields = Array.isArray(serviceData.fields) && serviceData.fields.length > 0
+        ? serviceData.fields
+        : (declaredFieldIds.length > 0
+            ? declaredFieldIds.map((id: string) => ({
+                id,
+                labelAr: id,
+                required: declaredRequiredIds.includes(id),
+                pattern: fieldPatternById[id]
+              }))
+            : fallbackFields);
+
+      if (!clientFields || typeof clientFields !== "object" || Array.isArray(clientFields)) {
+        return res.status(400).json({ error: "FIELDS_INVALID", message: "بيانات حقول الخدمة غير صالحة" });
+      }
+
       const safeFields: Record<string, any> = {};
-      if (Array.isArray(serviceData.fields)) {
-        for (const f of serviceData.fields) {
-          const val = (clientFields && clientFields[f.id] !== undefined) ? String(clientFields[f.id]).trim() : "";
-          if (f.required && !val) {
-            return res.status(400).json({ error: "FIELD_REQUIRED", message: `الحقل (${f.labelAr || f.label}) مطلوب` });
-          }
-          if (f.pattern && val && !new RegExp(f.pattern).test(val)) {
-            return res.status(400).json({ error: "FIELD_INVALID", message: `صيغة الحقل (${f.labelAr || f.label}) غير صحيحة` });
-          }
-          safeFields[f.id] = val;
+      for (const field of serviceFields) {
+        if (!field || typeof field.id !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(field.id)) continue;
+        const value = clientFields[field.id] !== undefined ? String(clientFields[field.id]).trim() : "";
+        const label = field.labelAr || field.label || field.id;
+
+        if (field.required && !value) {
+          return res.status(400).json({ error: "FIELD_REQUIRED", message: `الحقل (${label}) مطلوب` });
         }
+
+        const pattern = field.pattern || fieldPatternById[field.id];
+        if (pattern && value) {
+          try {
+            if (!new RegExp(pattern).test(value)) {
+              return res.status(400).json({ error: "FIELD_INVALID", message: `صيغة الحقل (${label}) غير صحيحة` });
+            }
+          } catch {
+            console.error("[Order Creation] Invalid configured validation pattern for field:", field.id);
+            return res.status(409).json({ error: "SERVICE_FIELD_RULE_INVALID", message: "إعدادات أحد حقول الخدمة غير صالحة. يرجى مراجعة الإدارة." });
+          }
+        }
+        if (field.minLength && value.length < Number(field.minLength)) {
+          return res.status(400).json({ error: "FIELD_INVALID", message: `الحقل (${label}) أقصر من الحد المسموح` });
+        }
+        if (field.maxLength && value.length > Number(field.maxLength)) {
+          return res.status(400).json({ error: "FIELD_INVALID", message: `الحقل (${label}) أطول من الحد المسموح` });
+        }
+        safeFields[field.id] = value;
       }
 
       // 5. Determine Authenticated User or Guest identity
@@ -655,13 +1265,13 @@ async function startServer() {
       // Verify not blocked if authenticated
       if (decodedUser) {
         try {
-          const firestore = getDb();
           const userDoc = await firestore.collection("users").doc(decodedUser.uid).get();
           if (userDoc.exists && userDoc.data()?.blocked === true) {
             return res.status(403).json({ error: "USER_BLOCKED", message: "حسابك محظور من إجراء طلبات جديدة" });
           }
-        } catch (authDocErr) {
-          console.warn("[Order Creation] User check notice:", authDocErr);
+        } catch (authDocErr: any) {
+          console.error("[Order Creation] Could not verify user status:", authDocErr?.message || authDocErr);
+          return res.status(503).json({ error: "USER_STATUS_UNAVAILABLE", message: "تعذر التحقق من حالة الحساب. لم يتم قبول الطلب." });
         }
       }
 
@@ -670,7 +1280,6 @@ async function startServer() {
         const cleanPhone = String(senderPhone).replace(/[^0-9]/g, '');
         if (cleanPhone.length >= 8) {
           try {
-            const firestore = getDb();
             const blockedPhoneSnap = await firestore.collection("users")
               .where("phoneNumber", "==", cleanPhone)
               .where("blocked", "==", true)
@@ -679,8 +1288,9 @@ async function startServer() {
             if (!blockedPhoneSnap.empty) {
               return res.status(403).json({ error: "PHONE_BLOCKED", message: "هذا الرقم محظور من إجراء طلبات جديدة" });
             }
-          } catch (phoneErr) {
-            console.warn("[Order Creation] Phone check notice:", phoneErr);
+          } catch (phoneErr: any) {
+            console.error("[Order Creation] Could not verify sender phone status:", phoneErr?.message || phoneErr);
+            return res.status(503).json({ error: "PHONE_STATUS_UNAVAILABLE", message: "تعذر التحقق من رقم المرسل. لم يتم قبول الطلب." });
           }
         }
       }
@@ -690,16 +1300,25 @@ async function startServer() {
       const recipientId = safeFields.playerId || safeFields.email || safeFields.phone || safeFields.cardId || safeFields.username || senderPhone;
       if (recipientId && effectiveUserId) {
         try {
-          const firestore = getDb();
-          const activeOrdersQuery = await firestore.collection("orders")
-            .where("serviceId", "==", serviceId)
-            .where("status", "==", "pending")
-            .where("userId", "==", effectiveUserId)
-            .limit(6)
-            .get();
+          let activeOrdersRef = firestore.collection("orders")
+            .where("serviceId", "==", serviceId);
+
+          if (decodedUser) {
+            activeOrdersRef = activeOrdersRef.where("userId", "==", effectiveUserId) as any;
+          } else if (senderPhone) {
+            activeOrdersRef = activeOrdersRef.where("senderPhone", "==", String(senderPhone).trim()) as any;
+          } else if (effectiveUserEmail) {
+            activeOrdersRef = activeOrdersRef.where("userEmail", "==", effectiveUserEmail) as any;
+          } else {
+            activeOrdersRef = activeOrdersRef.where("userId", "==", effectiveUserId) as any;
+          }
+
+          const activeOrdersQuery = await activeOrdersRef.limit(30).get();
 
           const hasDuplicateActive = activeOrdersQuery.docs.some(docSnap => {
             const d = docSnap.data();
+            const existingStatus = String(d.status || "").toLowerCase();
+            if (!["pending", "approved", "shipped"].includes(existingStatus)) return false;
             if (d.attemptId === clientAttemptId) return false; // Handled by idempotency replay
             const prevRecipient = d.fields?.playerId || d.fields?.email || d.fields?.phone || d.fields?.cardId || d.fields?.username || d.senderPhone;
             return prevRecipient === recipientId;
@@ -711,8 +1330,9 @@ async function startServer() {
               message: "يوجد طلب نشط قيد التنفيذ حالياً لنفس الحساب أو المستلم. يرجى الانتظار حتى اكتمال معالجة الطلب السابق."
             });
           }
-        } catch (activeErr) {
-          console.warn("[Order Creation] Active orders check warning:", activeErr);
+        } catch (activeErr: any) {
+          console.error("[Order Creation] Active order check failed:", activeErr?.message || activeErr);
+          return res.status(503).json({ error: "ACTIVE_ORDER_CHECK_UNAVAILABLE", message: "تعذر التحقق من الطلبات النشطة. لم يتم قبول الطلب لتجنب التكرار." });
         }
       }
 
@@ -727,20 +1347,34 @@ async function startServer() {
       });
       const payloadHash = crypto.createHash("sha256").update(payloadString).digest("hex");
 
+      // Deterministic server-side lock prevents two distinct attempt IDs from creating
+      // concurrent pending orders for the same account, service and recipient.
+      const guestLockIdentity = isGuest
+        ? (
+            String(senderPhone || "").replace(/[^0-9]/g, "") ||
+            String(effectiveUserEmail || "").trim().toLowerCase() ||
+            clientAttemptId
+          )
+        : effectiveUserId;
+      const activeOrderLockId = recipientId
+        ? crypto.createHash("sha256").update(JSON.stringify([guestLockIdentity, serviceId, String(recipientId)])).digest("hex")
+        : null;
+      const activeOrderLockRef = activeOrderLockId
+        ? firestore.collection("order_active_locks").doc(activeOrderLockId)
+        : null;
+
       // Stable cryptographic tracking token and secure hash for guest orders
       const trackingToken = crypto.randomBytes(24).toString("hex");
       const trackingTokenHash = crypto.createHash("sha256").update(trackingToken).digest("hex");
 
-      // 7. Atomic Idempotency Check & Order Insertion
+      // 7. Atomic Idempotency Check & Order Insertion (Admin SDK only).
+      // Never fall back to client-rule REST writes: they are not atomic and can duplicate orders.
       let orderId = "";
       let trackingTokenResult: string | null = null;
       let isReplay = false;
-      let adminSucceeded = false;
 
       try {
-        const firestore = getDb();
         const idempotencyRef = firestore.collection("order_idempotency").doc(clientAttemptId);
-        
         const transactionResult = await firestore.runTransaction(async (transaction) => {
           const idempSnap = await transaction.get(idempotencyRef);
 
@@ -754,6 +1388,13 @@ async function startServer() {
               orderId: prev.orderId,
               trackingToken: prev.trackingToken || null
             };
+          }
+
+          const activeLockSnap = activeOrderLockRef
+            ? await transaction.get(activeOrderLockRef)
+            : null;
+          if (activeLockSnap?.exists) {
+            throw new Error("DUPLICATE_ACTIVE_ORDER");
           }
 
           const newOrderRef = firestore.collection("orders").doc();
@@ -795,6 +1436,17 @@ async function startServer() {
             createdAt: admin.firestore.FieldValue.serverTimestamp()
           });
 
+          if (activeOrderLockRef) {
+            transaction.set(activeOrderLockRef, {
+              userId: effectiveUserId,
+              serviceId,
+              recipientId: String(recipientId),
+              orderId: newOrderId,
+              status: "pending",
+              createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
+
           return {
             isReplay: false,
             orderId: newOrderId,
@@ -805,74 +1457,24 @@ async function startServer() {
         orderId = transactionResult.orderId;
         trackingTokenResult = transactionResult.trackingToken;
         isReplay = transactionResult.isReplay;
-        adminSucceeded = true;
       } catch (txErr: any) {
         if (txErr.message === "IDEMPOTENCY_PAYLOAD_MISMATCH") {
-          return res.status(409).json({ 
-            error: "IDEMPOTENCY_CONFLICT", 
-            message: "رمز المحاولة هذا تم استخدامه مسبقاً ببيانات مختلفة. يرجى تحديث الصفحة وإعادة المحاولة." 
+          return res.status(409).json({
+            error: "IDEMPOTENCY_CONFLICT",
+            message: "رمز المحاولة هذا تم استخدامه مسبقاً ببيانات مختلفة. يرجى تحديث الصفحة وإعادة المحاولة."
           });
         }
-        console.warn("[Admin Order Notice] Transaction unavailable, executing via REST fallback:", txErr?.message || txErr);
-      }
-
-      // Seamless REST Fallback when admin service account is unprovisioned
-      if (!adminSucceeded) {
-        const existingIdemp = await getDocRest("order_idempotency", clientAttemptId);
-        if (existingIdemp) {
-          if (existingIdemp.payloadHash !== payloadHash) {
-            return res.status(409).json({
-              error: "IDEMPOTENCY_CONFLICT",
-              message: "رمز المحاولة هذا تم استخدامه مسبقاً ببيانات مختلفة. يرجى تحديث الصفحة وإعادة المحاولة."
-            });
-          }
-          orderId = existingIdemp.orderId;
-          trackingTokenResult = existingIdemp.trackingToken || null;
-          isReplay = true;
-        } else {
-          orderId = 'ord_' + Date.now().toString(36) + '_' + crypto.randomBytes(6).toString("hex");
-          const orderDocData = {
-            id: orderId,
-            userId: effectiveUserId,
-            isGuest: isGuest,
-            userName: effectiveUserName,
-            userEmail: effectiveUserEmail,
-            serviceId: serviceId,
-            serviceName: serviceData.nameAr || serviceData.name || "خدمة رقمية",
-            serviceType: serviceData.nameAr || serviceData.name || "خدمة رقمية",
-            amount: finalAmount,
-            total: finalAmount,
-            fee: 0,
-            status: "pending",
-            fields: safeFields,
-            paymentMethod: trustedPaymentMethod,
-            senderPhone: isQuoteMode ? "" : (senderPhone ? String(senderPhone).trim() : ""),
-            proofImageUrl: proofImageUrl || "",
-            proofUrl: proofImageUrl || "",
-            attemptId: clientAttemptId,
-            trackingToken: isGuest ? trackingToken : null,
-            trackingTokenHash: isGuest ? trackingTokenHash : null,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          };
-
-          const orderSaved = await setDocRest("orders", orderId, orderDocData);
-          if (!orderSaved) {
-            throw new Error("فشل حفظ الطلب في قاعدة البيانات السحابية");
-          }
-
-          await setDocRest("order_idempotency", clientAttemptId, {
-            attemptId: clientAttemptId,
-            orderId: orderId,
-            payloadHash: payloadHash,
-            trackingToken: isGuest ? trackingToken : null,
-            trackingTokenHash: isGuest ? trackingTokenHash : null,
-            createdAt: new Date().toISOString()
+        if (txErr.message === "DUPLICATE_ACTIVE_ORDER") {
+          return res.status(409).json({
+            error: "DUPLICATE_ACTIVE_ORDER",
+            message: "يوجد طلب نشط قيد التنفيذ لنفس الحساب والخدمة والمستلم. انتظر انتهاء معالجته قبل إنشاء طلب جديد."
           });
-
-          trackingTokenResult = isGuest ? trackingToken : null;
-          isReplay = false;
         }
+        console.error("[Order Creation] Atomic Firestore transaction failed:", txErr?.message || txErr);
+        return res.status(503).json({
+          error: "ORDER_SAVE_UNAVAILABLE",
+          message: "تعذر تأكيد حفظ الطلب في قاعدة البيانات. لم يتم اعتبار الطلب ناجحاً؛ يمكنك إعادة المحاولة بنفس الصفحة."
+        });
       }
 
       return res.status(200).json({
@@ -927,17 +1529,37 @@ async function startServer() {
       }
 
       const orderData = snapshot.docs[0].data();
+      const toIso = (value: any) => {
+        if (!value) return null;
+        if (typeof value.toDate === "function") return value.toDate().toISOString();
+        if (value instanceof Date) return value.toISOString();
+        if (typeof value === "string") return value;
+        if (typeof value.seconds === "number") return new Date(value.seconds * 1000).toISOString();
+        return null;
+      };
+
       return res.json({
         success: true,
         order: {
           id: snapshot.docs[0].id,
-          serviceName: orderData.serviceName || orderData.serviceType,
+          isGuest: orderData.isGuest === true,
+          userName: orderData.userName || "زائر",
+          userEmail: orderData.userEmail || "",
+          serviceId: orderData.serviceId || "",
+          serviceName: orderData.serviceName || orderData.serviceType || "خدمة رقمية",
+          serviceType: orderData.serviceType || orderData.serviceName || "خدمة رقمية",
           amount: orderData.amount,
+          total: orderData.total ?? orderData.amount,
           status: orderData.status,
+          fields: orderData.fields || {},
+          paymentMethod: orderData.paymentMethod || "",
+          senderPhone: orderData.senderPhone || "",
+          proofImageUrl: orderData.proofImageUrl || orderData.proofUrl || "",
           pinCode: orderData.pinCode || null,
           adminNote: orderData.adminNote || null,
           rejectionReason: orderData.rejectionReason || null,
-          createdAt: orderData.createdAt
+          createdAt: toIso(orderData.createdAt),
+          updatedAt: toIso(orderData.updatedAt)
         }
       });
     } catch (err) {
@@ -960,11 +1582,15 @@ async function startServer() {
       const firestore = getDb();
       const isOwner = isOwnerUser(decoded);
 
-      // Check staff role if not owner
+      // Resolve staff and legacy admin roles from trusted server-side records.
       if (!isOwner) {
-        const staffDoc = await firestore.collection("staff").doc(decoded.uid).get();
-        const role = staffDoc.exists && staffDoc.data()?.active ? staffDoc.data()?.role : null;
-        if (!['orders_manager', 'admin'].includes(role)) {
+        const [staffDoc, userDoc] = await Promise.all([
+          firestore.collection("staff").doc(decoded.uid).get(),
+          firestore.collection("users").doc(decoded.uid).get()
+        ]);
+        const staffRole = staffDoc.exists && staffDoc.data()?.active === true ? staffDoc.data()?.role : null;
+        const userRole = userDoc.exists ? userDoc.data()?.role : null;
+        if (!["orders_manager", "admin", "orders"].includes(staffRole) && userRole !== "admin") {
           return res.status(403).json({ error: "FORBIDDEN", message: "ليس لديك صلاحية لتعديل حالة الطلب" });
         }
       }
@@ -981,70 +1607,146 @@ async function startServer() {
 
       const orderRef = firestore.collection("orders").doc(orderId);
 
-      // Atomic Update with Referral Rewarding
+      // Atomic order status, one-time referral reward and customer notification.
       const updateResult = await firestore.runTransaction(async (transaction) => {
         const orderSnap = await transaction.get(orderRef);
-        if (!orderSnap.exists) {
-          throw new Error("ORDER_NOT_FOUND");
-        }
-        const currentData = orderSnap.data() || {};
-        const currentStatus = (currentData.status || "pending").toLowerCase();
+        if (!orderSnap.exists) throw new Error("ORDER_NOT_FOUND");
 
-        // Valid status transition rule enforcement:
-        // Do not allow completed orders to be reverted to pending or approved without owner
+        const currentData = orderSnap.data() || {};
+        const currentStatus = String(currentData.status || "pending").toLowerCase();
         if (currentStatus === "completed" && targetStatus !== "completed" && !isOwner) {
           throw new Error("COMPLETED_ORDER_IMMUTABLE");
         }
 
-        const updates: any = {
-          status: targetStatus,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        };
+        const recipientId = currentData.fields?.playerId || currentData.fields?.email ||
+          currentData.fields?.phone || currentData.fields?.cardId ||
+          currentData.fields?.username || currentData.senderPhone || "";
+        const lockIdentity = currentData.isGuest === true
+          ? (
+              String(currentData.senderPhone || "").replace(/[^0-9]/g, "") ||
+              String(currentData.userEmail || "").trim().toLowerCase() ||
+              String(currentData.userId || "")
+            )
+          : String(currentData.userId || "");
+        const activeOrderLockId = recipientId
+          ? crypto.createHash("sha256").update(JSON.stringify([
+              lockIdentity,
+              String(currentData.serviceId || ""),
+              String(recipientId)
+            ])).digest("hex")
+          : null;
+        const activeOrderLockRef = activeOrderLockId
+          ? firestore.collection("order_active_locks").doc(activeOrderLockId)
+          : null;
+        const activeOrderLockSnap = activeOrderLockRef
+          ? await transaction.get(activeOrderLockRef)
+          : null;
 
-        if (adminNote !== undefined) updates.adminNote = adminNote ? String(adminNote).trim() : null;
-        if (rejectionReason !== undefined) updates.rejectionReason = rejectionReason ? String(rejectionReason).trim() : null;
-        if (pinCode !== undefined) updates.pinCode = pinCode ? String(pinCode).trim() : null;
-        if (targetStatus === "completed") {
-          updates.completedAt = admin.firestore.FieldValue.serverTimestamp();
+        if (targetStatus === "pending" && activeOrderLockSnap?.exists &&
+            activeOrderLockSnap.data()?.orderId !== orderId) {
+          throw new Error("DUPLICATE_ACTIVE_ORDER");
         }
 
-        transaction.update(orderRef, updates);
+        // Read all documents before writing anything in this Firestore transaction.
+        let userRef: any = null;
+        let userSnap: any = null;
+        let referrerRef: any = null;
+        let referrerSnap: any = null;
+        let shouldRewardReferral = false;
 
-        // Atomic Referral Rewarding: Only on genuinely completed order, exactly once, 30 MRU
-        let referralRewarded = false;
         if (targetStatus === "completed" && currentData.userId && !currentData.isGuest) {
-          const userRef = firestore.collection("users").doc(currentData.userId);
-          const userSnap = await transaction.get(userRef);
-          if (userSnap.exists) {
-            const userData = userSnap.data() || {};
-            if (userData.referredBy && !userData.isReferralRewarded) {
-              const referrerRef = firestore.collection("users").doc(userData.referredBy);
-              const referrerSnap = await transaction.get(referrerRef);
-              if (referrerSnap.exists) {
-                const referrerData = referrerSnap.data() || {};
-                const currentEarnings = Number(referrerData.referralEarnings || 0);
-                const currentCount = Number(referrerData.referralsCount || 0);
-                const currentPoints = Number(referrerData.loyaltyPoints || 0);
-
-                transaction.update(userRef, {
-                  isReferralRewarded: true,
-                  firstCompletedOrderAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-
-                transaction.update(referrerRef, {
-                  referralsCount: currentCount + 1,
-                  referralEarnings: currentEarnings + 30,
-                  loyaltyPoints: currentPoints + 30,
-                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-
-                referralRewarded = true;
-              }
-            }
+          userRef = firestore.collection("users").doc(String(currentData.userId));
+          userSnap = await transaction.get(userRef);
+          const userData = userSnap.exists ? userSnap.data() || {} : {};
+          if (userData.referredBy && !userData.isReferralRewarded) {
+            referrerRef = firestore.collection("users").doc(String(userData.referredBy));
+            referrerSnap = await transaction.get(referrerRef);
+            shouldRewardReferral = Boolean(referrerSnap.exists);
           }
         }
 
-        return { success: true, referralRewarded };
+        const notificationRef = currentData.userId
+          ? firestore.collection("notifications").doc()
+          : null;
+        const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+        const updates: Record<string, any> = {
+          status: targetStatus,
+          updatedAt: serverTimestamp
+        };
+        if (adminNote !== undefined) updates.adminNote = adminNote ? String(adminNote).trim() : null;
+        if (rejectionReason !== undefined) updates.rejectionReason = rejectionReason ? String(rejectionReason).trim() : null;
+        if (pinCode !== undefined) updates.pinCode = pinCode ? String(pinCode).trim() : null;
+        if (targetStatus === "completed") updates.completedAt = serverTimestamp;
+
+        transaction.update(orderRef, updates);
+
+        if (activeOrderLockRef) {
+          if (["pending", "approved", "shipped"].includes(targetStatus)) {
+            transaction.set(activeOrderLockRef, {
+              userId: lockIdentity,
+              serviceId: currentData.serviceId || "",
+              recipientId: String(recipientId),
+              orderId,
+              status: targetStatus,
+              updatedAt: serverTimestamp
+            }, { merge: true });
+          } else if (activeOrderLockSnap?.exists && activeOrderLockSnap.data()?.orderId === orderId) {
+            transaction.delete(activeOrderLockRef);
+          }
+        }
+
+        if (shouldRewardReferral && userRef && userSnap && referrerRef && referrerSnap) {
+          const referrerData = referrerSnap.data() || {};
+          transaction.update(userRef, {
+            isReferralRewarded: true,
+            firstCompletedOrderAt: serverTimestamp
+          });
+          transaction.update(referrerRef, {
+            referralsCount: Number(referrerData.referralsCount || 0) + 1,
+            referralEarnings: Number(referrerData.referralEarnings || 0) + 30,
+            loyaltyPoints: Number(referrerData.loyaltyPoints || 0) + 30,
+            updatedAt: serverTimestamp
+          });
+        }
+
+        if (notificationRef) {
+          const orderNumber = orderId.slice(0, 8).toUpperCase();
+          const serviceName = currentData.serviceName || currentData.serviceType || "خدمة رقمية";
+          const note = adminNote ? String(adminNote).trim() : "";
+          const pin = pinCode ? String(pinCode).trim() : "";
+          const rejectReason = rejectionReason ? String(rejectionReason).trim() : "";
+          const titles: Record<string, string> = {
+            pending: "تم إرجاع طلبك للمراجعة",
+            approved: "تم قبول طلبك وبدء معالجته",
+            shipped: "تم شحن/إرسال طلبك",
+            completed: "تم إكمال طلبك بنجاح",
+            rejected: "تم رفض طلبك"
+          };
+          let body = `تم تحديث حالة طلبك رقم #${orderNumber}.`;
+          if (targetStatus === "completed") {
+            body = `اكتملت عملية شحن طلبك لخدمة (${serviceName}).${note ? ` ملاحظة: ${note}` : ""}${pin ? ` كود الشحن: ${pin}` : ""}`;
+          } else if (targetStatus === "approved") {
+            body = `تم قبول طلبك لخدمة (${serviceName}) وجاري تنفيذه.${note ? ` ملاحظة: ${note}` : ""}`;
+          } else if (targetStatus === "shipped") {
+            body = `تم شحن طلبك لخدمة (${serviceName}).${note ? ` ملاحظة: ${note}` : ""}`;
+          } else if (targetStatus === "rejected") {
+            body = `تم رفض الطلب رقم #${orderNumber}. سبب الرفض: ${rejectReason}`;
+          } else if (note) {
+            body += ` ملاحظة: ${note}`;
+          }
+
+          transaction.set(notificationRef, {
+            userId: currentData.userId,
+            orderId,
+            title: titles[targetStatus] || "تحديث على طلبك",
+            body,
+            read: false,
+            type: targetStatus === "completed" ? "success" : targetStatus === "rejected" ? "error" : "info",
+            createdAt: serverTimestamp
+          });
+        }
+
+        return { success: true, referralRewarded: shouldRewardReferral };
       });
 
       return res.json({ success: true, status: targetStatus, referralRewarded: updateResult.referralRewarded });
@@ -1055,6 +1757,9 @@ async function startServer() {
       }
       if (err.message === "COMPLETED_ORDER_IMMUTABLE") {
         return res.status(400).json({ error: "COMPLETED_ORDER_IMMUTABLE", message: "الطلب المكتمل لا يمكن تعديله إلا بواسطة المالك" });
+      }
+      if (err.message === "DUPLICATE_ACTIVE_ORDER") {
+        return res.status(409).json({ error: "DUPLICATE_ACTIVE_ORDER", message: "لا يمكن إرجاع الطلب إلى قيد الانتظار لوجود طلب نشط آخر لنفس المستلم." });
       }
       console.error("[Admin Update Order Error]:", err);
       return res.status(500).json({ error: "INTERNAL_ERROR", message: "فشل تحديث حالة الطلب" });
