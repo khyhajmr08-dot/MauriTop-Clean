@@ -1,0 +1,177 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and balance",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "admin"] },
+        "balance": { "type": "number" },
+        "blocked": { "type": "boolean" },
+        "createdAt": { "type": "object" },
+        "phoneNumber": { "type": "string" }
+      },
+      "required": ["uid", "name", "email", "role", "balance", "blocked"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Service request order",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "serviceType": { "type": "string" },
+        "amount": { "type": "number" },
+        "fee": { "type": "number" },
+        "total": { "type": "number" },
+        "accountDetails": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "object" },
+        "updatedAt": { "type": "object" }
+      },
+      "required": ["userId", "serviceType", "amount", "total", "status"]
+    },
+    "Deposit": {
+      "title": "Deposit",
+      "description": "Deposit request for balance",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "amount": { "type": "number" },
+        "method": { "type": "string" },
+        "proofUrl": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "object" },
+        "updatedAt": { "type": "object" }
+      },
+      "required": ["userId", "amount", "method", "status"]
+    },
+    "Withdrawal": {
+      "title": "Withdrawal",
+      "description": "Withdrawal request",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "amount": { "type": "number" },
+        "method": { "type": "string" },
+        "accountDetails": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "object" },
+        "updatedAt": { "type": "object" }
+      },
+      "required": ["userId", "amount", "method", "status"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User or Admin notification",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "object" }
+      }
+    },
+    "Log": {
+      "title": "Log",
+      "description": "System activity log",
+      "type": "object",
+      "properties": {
+        "actorId": { "type": "string" },
+        "action": { "type": "string" },
+        "targetId": { "type": "string" },
+        "details": { "type": "string" },
+        "createdAt": { "type": "object" }
+      }
+    },
+    "AdminLog": {
+      "title": "AdminLog",
+      "description": "Admin activity log",
+      "type": "object",
+      "properties": {
+        "adminId": { "type": "string" },
+        "adminName": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "targetUserName": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "reason": { "type": "string" },
+        "timestamp": { "type": "object" }
+      }
+    },
+    "Post": {
+      "title": "Post",
+      "description": "User posts",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "publishedAt": { "type": "object", "description": "Timestamp when approved" },
+        "createdAt": { "type": "object" },
+        "authorId": { "type": "string" },
+        "imageUrl": { "type": "string", "description": "Optional image URL for the post" },
+        "description": { "type": "string", "description": "Optional long description or body of the post" },
+        "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional list of tags" }
+      },
+      "required": ["title", "status", "authorId"]
+    },
+    "PaymentMethod": {
+      "title": "PaymentMethod",
+      "description": "Platform payment methods",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "image": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "order": { "type": "number" }
+      },
+      "required": ["name", "status"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents"
+    },
+    "orders/{orderId}": {
+      "schema": "Order",
+      "description": "Service orders"
+    },
+    "deposits/{depositId}": {
+      "schema": "Deposit",
+      "description": "Deposit requests"
+    },
+    "withdrawals/{withdrawalId}": {
+      "schema": "Withdrawal",
+      "description": "Withdrawal requests"
+    },
+    "notifications/{notifId}": {
+      "schema": "Notification",
+      "description": "User notifications"
+    },
+    "logs/{logId}": {
+      "schema": "Log",
+      "description": "System logs"
+    },
+    "admin_logs/{logId}": {
+      "schema": "AdminLog",
+      "description": "Admin actions logs"
+    },
+    "posts/{postId}": {
+      "schema": "Post",
+      "description": "User posts for admin review"
+    },
+    "paymentMethods/{id}": {
+      "schema": "PaymentMethod",
+      "description": "Available payment methods"
+    }
+  }
+}

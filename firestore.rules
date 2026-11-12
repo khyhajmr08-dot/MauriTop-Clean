@@ -1,0 +1,174 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- DEFAULT DENY ALL ---
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner() {
+      return isSignedIn() && (
+        (request.auth.token.email != null && request.auth.token.email.lower() == 'khyhajmr08@gmail.com') || 
+        request.auth.uid == 'PqXqqCgdC1eYPz4HKHHLtDRejPD3'
+      );
+    }
+
+    function isStaffMember() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/staff/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.active == true
+      );
+    }
+
+    function hasStaffRole(role) {
+      return isOwner() || (
+        isStaffMember() && 
+        get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role == role
+      );
+    }
+
+    function isAdmin() {
+      return isOwner() || isStaffMember() || isUserRole('admin');
+    }
+
+    function isUserRole(role) {
+       return isSignedIn() && 
+              exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+              (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role ||
+               get(/databases/$(database)/documents/users/$(request.auth.uid)).data.staffRole == role);
+    }
+
+    // --- SERVICES ---
+    match /services/{serviceId} {
+      allow read: if true;
+      allow write: if isOwner() || hasStaffRole('services_manager') || isUserRole('admin');
+    }
+
+    // --- USERS ---
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      // Allow users to update their own profile, but prevent unauthorized role elevation
+      allow update: if isOwner() || (
+        isSignedIn() && 
+        request.auth.uid == userId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'staffRole', 'referralsCount', 'referralEarnings', 'isReferralRewarded', 'balance'])
+      );
+      allow delete: if isOwner();
+    }
+
+    // --- STAFF MEMBERS & ROLES (RBAC) ---
+    match /staff/{staffId} {
+      // Owner can read all, staff members can read their own assignment
+      allow read: if isOwner() || (isSignedIn() && request.auth.uid == staffId);
+      // ONLY the Owner can hire, fire, or modify staff roles
+      allow write: if isOwner();
+    }
+
+    // --- AUDIT LOGS (IMMUTABLE SECURITY TRAIL) ---
+    match /audit_logs/{logId} {
+      // Owner can read full audit logs
+      allow read: if isOwner();
+      // Staff members and owner can log audit records
+      allow create: if isSignedIn();
+      // Audit logs can NEVER be updated or deleted by anyone
+      allow update, delete: if false;
+    }
+
+    // --- ORDERS ---
+    match /orders/{orderId} {
+      // Users can read their own orders. Staff and Admin can read all.
+      allow read: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+
+      // Single-document tracking: A guest with their exact orderId can read their order document
+      allow get: if isAdmin() || 
+                    (isSignedIn() && resource.data.userId == request.auth.uid) ||
+                    (resource.data.isGuest == true && resource.data.trackingToken != null);
+
+      // Authenticated users creating for themselves OR guests with isGuest == true
+      allow create: if (
+        (isSignedIn() && request.resource.data.userId == request.auth.uid) ||
+        (!isSignedIn() && request.resource.data.isGuest == true && request.resource.data.userId.matches('^guest_[a-zA-Z0-9_-]+$'))
+      ) &&
+      request.resource.data.status == 'pending' &&
+      request.resource.data.amount is number && request.resource.data.amount >= 0 &&
+      request.resource.data.serviceId is string &&
+      (!('pinCode' in request.resource.data) || request.resource.data.pinCode == null) &&
+      (!('adminNote' in request.resource.data) || request.resource.data.adminNote == null) &&
+      (!('rejectionReason' in request.resource.data) || request.resource.data.rejectionReason == null) &&
+      (!('completedAt' in request.resource.data) || request.resource.data.completedAt == null);
+
+      // Orders managers and owner can update status/notes
+      allow update: if isOwner() || hasStaffRole('orders_manager') || isUserRole('orders_manager') || isUserRole('admin');
+      // ONLY the Owner can permanently delete order history
+      allow delete: if isOwner();
+    }
+
+    // --- ORDER IDEMPOTENCY ---
+    match /order_idempotency/{attemptId} {
+      allow read, write: if true;
+    }
+
+    // --- NOTIFICATIONS ---
+    match /notifications/{notifId} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isAdmin();
+      allow update: if isAdmin() || (
+        isSignedIn() && 
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+      );
+      allow delete: if isOwner() || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    // --- WITHDRAWALS ---
+    match /withdrawals/{withdrawalId} {
+      allow read: if isOwner() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isOwner();
+    }
+
+    // --- KYC REQUESTS ---
+    match /kyc_requests/{userId} {
+      allow read: if isOwner() || hasStaffRole('orders_manager') || isUserRole('admin') || (isSignedIn() && request.auth.uid == userId);
+      // Users can submit their document but cannot approve or set verification status
+      allow create: if (isSignedIn() && request.auth.uid == userId) &&
+                       (!('isVerified' in request.resource.data) || request.resource.data.isVerified == false) &&
+                       (!('reviewStatus' in request.resource.data) || request.resource.data.reviewStatus == 'pending');
+      // Only authorized staff can change verification status; users can only re-upload their documents while pending
+      allow update: if isOwner() || hasStaffRole('orders_manager') || isUserRole('admin') || (
+        isSignedIn() && 
+        request.auth.uid == userId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isVerified', 'reviewStatus', 'reviewedBy', 'reviewedByName', 'reviewedAt', 'adminNote'])
+      );
+      allow delete: if isOwner();
+    }
+
+    // --- SETTINGS (GLOBAL & PAYMENT) ---
+    match /settings/{docId} {
+      allow read: if true;
+      // Sensitive payment and system settings can only be altered by Owner or Admin
+      allow write: if isOwner() || isUserRole('admin');
+    }
+
+    // --- POSTS / WHATSAPP OFFERS ---
+    match /posts/{postId} {
+      allow read: if true;
+      allow write: if isOwner() || hasStaffRole('services_manager') || isUserRole('admin');
+    }
+
+    // --- ACTIVE VISITORS ---
+    match /active_visitors/{sessionId} {
+      allow read: if isAdmin();
+      allow write: if true;
+    }
+
+  }
+}

@@ -1,0 +1,32 @@
+# MAURITOP Robots.txt
+# Optimized for Google, Bing, and major search engines
+# Target Host: https://mauritop-v2-4ozx.vercel.app
+# Purpose: Protect private customer data while allowing indexing of public services
+
+User-agent: *
+
+# Allow all public content
+Allow: /
+Allow: /service-cards
+Allow: /faq
+Allow: /contact
+Allow: /assistant
+Allow: /services/
+Allow: /privacy
+Allow: /terms
+
+# Disallow private user and admin workflows
+Disallow: /admin
+Disallow: /admin/
+Disallow: /login
+Disallow: /register
+Disallow: /history
+Disallow: /profile
+Disallow: /orders
+Disallow: /kyc
+Disallow: /notifications
+Disallow: /invite/
+Disallow: /api/
+
+# Sitemap location
+Sitemap: https://mauritop-v2-4ozx.vercel.app/sitemap.xml

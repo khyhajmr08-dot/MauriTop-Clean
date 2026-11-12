@@ -1,0 +1,8 @@
+{
+  "name": "MauriTop",
+  "description": "MauriTop هي المنصة الرائدة في موريتانيا لشحن الألعاب والخدمات الرقمية. اختر خدمتك المفضلة (فري فاير، ببجي، نتفليكس، والمزيد)، أدخل بياناتك، وتابع طلبك بسهولة وأمان بالعملة المحلية (MRU).",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
