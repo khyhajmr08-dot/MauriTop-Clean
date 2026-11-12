@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useAuthState } from "react-firebase-hooks/auth";
 import { updateProfile, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc, collection, addDoc, query, where, orderBy, onSnapshot, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc, setDoc, collection, query, where, orderBy, onSnapshot } from "firebase/firestore";
 import { useNavigate } from "react-router-dom";
 import { auth, db } from "../lib/firebase";
 import SEO from "../components/SEO";
@@ -143,30 +143,33 @@ export default function Profile() {
 
     setSubmittingWithdraw(true);
     try {
-      // 1. Create withdrawal request in Firestore
-      await addDoc(collection(db, "withdrawals"), {
-        userId: user.uid,
-        userName: name || user.displayName || "مستخدم موري توب",
-        userEmail: user.email || "",
-        amount: amt,
-        bankilyPhone: withdrawPhone.trim(),
-        status: "pending", // pending, approved, rejected
-        createdAt: serverTimestamp(),
-        adminNote: ""
+      // Create the withdrawal and reserve the points in one trusted server transaction.
+      const idToken = await user.getIdToken();
+      const response = await fetch("/api/withdrawals", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`
+        },
+        body: JSON.stringify({
+          amount: amt,
+          bankilyPhone: withdrawPhone.trim()
+        })
       });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "تعذر إرسال طلب السحب");
+      }
 
-      // 2. Deduct points immediately
-      const newPoints = loyaltyPoints - amt;
-      await setDoc(doc(db, "users", user.uid), { loyaltyPoints: newPoints }, { merge: true });
-      setLoyaltyPoints(newPoints);
+      setLoyaltyPoints(Number(result.remainingPoints ?? (loyaltyPoints - amt)));
 
       haptic.success();
       showToast(isArabic ? "تم إرسال طلب سحب المكافآت إلى الإدارة بنجاح! 🚀" : "Demande de retrait envoyée avec succès !", "success");
       setShowWithdrawModal(false);
       setWithdrawAmount("500");
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      showToast(isArabic ? "فشل إرسال طلب السحب، يرجى المحاولة لاحقاً" : "Erreur lors de la demande de retrait", "error");
+      showToast(err?.message || (isArabic ? "فشل إرسال طلب السحب، يرجى المحاولة لاحقاً" : "Erreur lors de la demande de retrait"), "error");
     } finally {
       setSubmittingWithdraw(false);
     }
