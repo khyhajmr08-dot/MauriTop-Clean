@@ -133,10 +133,11 @@ export function FeaturedServicesSection({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 xs:gap-3 sm:gap-4">
+      <div className="grid min-w-0 grid-cols-[repeat(2,minmax(0,1fr))] lg:grid-cols-[repeat(4,minmax(0,1fr))] gap-2.5 xs:gap-3 sm:gap-4">
         {featuredOnes.map((service, index) => (
           <motion.div
             key={service.id}
+            className="min-w-0 w-full"
             initial={{ opacity: 0, y: 12 }}
             whileInView={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.04, duration: 0.2 }}
