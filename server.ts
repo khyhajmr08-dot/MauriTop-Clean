@@ -477,6 +477,165 @@ async function startServer() {
     }
   };
 
+  // Server-authoritative reward withdrawal request. The balance deduction and request creation are atomic.
+  app.post("/api/withdrawals", async (req, res) => {
+    try {
+      const decoded = await verifyAuthToken(req);
+      if (!decoded) {
+        return res.status(401).json({ error: "UNAUTHORIZED", message: "يرجى تسجيل الدخول قبل طلب سحب الأرباح" });
+      }
+
+      const amount = Number(req.body?.amount);
+      const bankilyPhone = String(req.body?.bankilyPhone || "").replace(/\\D/g, "").slice(-8);
+      if (!Number.isSafeInteger(amount) || amount < 500) {
+        return res.status(400).json({ error: "INVALID_WITHDRAWAL_AMOUNT", message: "الحد الأدنى للسحب هو 500 أوقية جديدة" });
+      }
+      if (!/^\\d{8}$/.test(bankilyPhone)) {
+        return res.status(400).json({ error: "INVALID_WITHDRAWAL_PHONE", message: "يرجى إدخال رقم بنكيلي صحيح مكوّن من 8 أرقام" });
+      }
+
+      const firestore = getDb();
+      const userRef = firestore.collection("users").doc(decoded.uid);
+      const pendingQuery = firestore.collection("withdrawals")
+        .where("userId", "==", decoded.uid)
+        .where("status", "==", "pending")
+        .limit(1);
+
+      const result = await firestore.runTransaction(async (transaction) => {
+        const userSnap = await transaction.get(userRef);
+        if (!userSnap.exists) throw new Error("WITHDRAWAL_USER_NOT_FOUND");
+        const userData = userSnap.data() || {};
+        if (userData.blocked === true) throw new Error("WITHDRAWAL_USER_BLOCKED");
+
+        const pendingSnap = await transaction.get(pendingQuery);
+        if (!pendingSnap.empty) throw new Error("WITHDRAWAL_ALREADY_PENDING");
+
+        const currentPoints = Number(userData.loyaltyPoints || 0);
+        if (!Number.isSafeInteger(currentPoints) || currentPoints < amount) {
+          throw new Error("WITHDRAWAL_INSUFFICIENT_POINTS");
+        }
+
+        const withdrawalRef = firestore.collection("withdrawals").doc();
+        transaction.update(userRef, {
+          loyaltyPoints: currentPoints - amount,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        transaction.set(withdrawalRef, {
+          userId: decoded.uid,
+          userName: userData.name || decoded.name || decoded.email?.split("@")[0] || "مستخدم",
+          userEmail: userData.email || decoded.email || "",
+          amount,
+          bankilyPhone,
+          status: "pending",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          adminNote: ""
+        });
+
+        return { withdrawalId: withdrawalRef.id, remainingPoints: currentPoints - amount };
+      });
+
+      return res.status(201).json({ success: true, ...result });
+    } catch (err: any) {
+      if (err.message === "WITHDRAWAL_USER_NOT_FOUND") {
+        return res.status(404).json({ error: err.message, message: "ملف المستخدم غير موجود" });
+      }
+      if (err.message === "WITHDRAWAL_USER_BLOCKED") {
+        return res.status(403).json({ error: err.message, message: "الحساب محظور من طلب سحب الأرباح" });
+      }
+      if (err.message === "WITHDRAWAL_ALREADY_PENDING") {
+        return res.status(409).json({ error: err.message, message: "لديك طلب سحب قيد المراجعة بالفعل" });
+      }
+      if (err.message === "WITHDRAWAL_INSUFFICIENT_POINTS") {
+        return res.status(400).json({ error: err.message, message: "رصيد المكافآت غير كافٍ لإتمام هذا السحب" });
+      }
+      console.error("[Withdrawal Request Error]:", err?.message || err);
+      return res.status(503).json({ error: "WITHDRAWAL_UNAVAILABLE", message: "تعذر إنشاء طلب السحب حالياً. لم يتم خصم أي رصيد." });
+    }
+  });
+
+  // Owner-only withdrawal approval/rejection. Rejections refund the held balance exactly once.
+  app.post("/api/admin/withdrawals/:withdrawalId/status", async (req, res) => {
+    try {
+      const decoded = await verifyAuthToken(req);
+      if (!decoded) {
+        return res.status(401).json({ error: "UNAUTHORIZED", message: "تسجيل الدخول الإداري مطلوب" });
+      }
+      if (!isOwnerUser(decoded)) {
+        return res.status(403).json({ error: "FORBIDDEN", message: "هذه العملية متاحة لمالك المنصة فقط" });
+      }
+
+      const targetStatus = String(req.body?.status || "").toLowerCase();
+      const adminNote = String(req.body?.adminNote || "").trim();
+      if (!["approved", "rejected"].includes(targetStatus)) {
+        return res.status(400).json({ error: "INVALID_WITHDRAWAL_STATUS", message: "حالة طلب السحب غير صالحة" });
+      }
+      if (targetStatus === "rejected" && !adminNote) {
+        return res.status(400).json({ error: "REJECTION_REASON_REQUIRED", message: "سبب رفض طلب السحب إلزامي" });
+      }
+
+      const firestore = getDb();
+      const withdrawalRef = firestore.collection("withdrawals").doc(req.params.withdrawalId);
+      const result = await firestore.runTransaction(async (transaction) => {
+        const withdrawalSnap = await transaction.get(withdrawalRef);
+        if (!withdrawalSnap.exists) throw new Error("WITHDRAWAL_NOT_FOUND");
+        const withdrawal = withdrawalSnap.data() || {};
+        if (withdrawal.status !== "pending") throw new Error("WITHDRAWAL_ALREADY_PROCESSED");
+
+        if (targetStatus === "rejected") {
+          const userRef = firestore.collection("users").doc(String(withdrawal.userId || ""));
+          const userSnap = await transaction.get(userRef);
+          if (!userSnap.exists) throw new Error("WITHDRAWAL_USER_NOT_FOUND");
+          const currentPoints = Number(userSnap.data()?.loyaltyPoints || 0);
+          const amount = Number(withdrawal.amount || 0);
+          if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error("WITHDRAWAL_AMOUNT_INVALID");
+          transaction.update(userRef, {
+            loyaltyPoints: currentPoints + amount,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        }
+
+        transaction.update(withdrawalRef, {
+          status: targetStatus,
+          adminNote: targetStatus === "rejected" ? adminNote : "",
+          processedBy: decoded.uid,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        const notificationRef = firestore.collection("notifications").doc();
+        transaction.set(notificationRef, {
+          userId: withdrawal.userId,
+          title: targetStatus === "approved" ? "تم سحب الأرباح بنجاح" : "تم رفض طلب سحب الأرباح",
+          body: targetStatus === "approved"
+            ? `تمت الموافقة على تحويل مبلغ ${withdrawal.amount} أوقية إلى حساب بنكيلي المنتهي بـ ${String(withdrawal.bankilyPhone || "").slice(-4)}.`
+            : `تم رفض طلب السحب وإعادة ${withdrawal.amount} أوقية إلى رصيدك. السبب: ${adminNote}`,
+          read: false,
+          type: targetStatus === "approved" ? "success" : "error",
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        return { success: true, status: targetStatus, refunded: targetStatus === "rejected" };
+      });
+
+      return res.json(result);
+    } catch (err: any) {
+      if (err.message === "WITHDRAWAL_NOT_FOUND") {
+        return res.status(404).json({ error: err.message, message: "طلب السحب غير موجود" });
+      }
+      if (err.message === "WITHDRAWAL_ALREADY_PROCESSED") {
+        return res.status(409).json({ error: err.message, message: "تمت معالجة طلب السحب مسبقاً" });
+      }
+      if (err.message === "WITHDRAWAL_USER_NOT_FOUND") {
+        return res.status(409).json({ error: err.message, message: "لا يمكن استرجاع الرصيد لأن ملف المستخدم غير موجود" });
+      }
+      if (err.message === "WITHDRAWAL_AMOUNT_INVALID") {
+        return res.status(409).json({ error: err.message, message: "قيمة طلب السحب المخزنة غير صالحة" });
+      }
+      console.error("[Withdrawal Processing Error]:", err?.message || err);
+      return res.status(503).json({ error: "WITHDRAWAL_PROCESSING_UNAVAILABLE", message: "تعذرت معالجة طلب السحب حالياً، لم يتم تأكيد أي تغيير." });
+    }
+  });
+
   // Secure Server-Authoritative Order Creation API (Supports Guests and Authenticated Users with Atomic Idempotency)
   app.post("/api/orders", checkMaintenance, async (req, res) => {
     try {
