@@ -49,7 +49,7 @@ export default function Register() {
           const referrerId = localStorage.getItem('referrerId');
           const safeReferrerId = referrerId && referrerId !== result.user.uid ? referrerId : null;
 
-          await setDoc(userRef, {
+          const initialProfile = {
             uid: result.user.uid,
             name: result.user.displayName || 'مستخدم موري توب',
             email: result.user.email,
@@ -64,7 +64,15 @@ export default function Register() {
             referralEarnings: 0,
             loyaltyPoints: 0,
             isReferralRewarded: false
-          });
+          };
+
+          try {
+            await setDoc(userRef, initialProfile);
+          } catch (profileError) {
+            // A stale or deleted referral link must not block account registration.
+            if (!safeReferrerId) throw profileError;
+            await setDoc(userRef, { ...initialProfile, referredBy: null });
+          }
 
           // Referral credit is added by the trusted server only after the first completed order.
           localStorage.removeItem('referrerId');
