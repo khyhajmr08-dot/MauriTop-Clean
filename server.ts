@@ -1359,11 +1359,15 @@ async function startServer() {
       const firestore = getDb();
       const isOwner = isOwnerUser(decoded);
 
-      // Check staff role if not owner
+      // Resolve staff and legacy admin roles from trusted server-side records.
       if (!isOwner) {
-        const staffDoc = await firestore.collection("staff").doc(decoded.uid).get();
-        const role = staffDoc.exists && staffDoc.data()?.active ? staffDoc.data()?.role : null;
-        if (!['orders_manager', 'admin'].includes(role)) {
+        const [staffDoc, userDoc] = await Promise.all([
+          firestore.collection("staff").doc(decoded.uid).get(),
+          firestore.collection("users").doc(decoded.uid).get()
+        ]);
+        const staffRole = staffDoc.exists && staffDoc.data()?.active === true ? staffDoc.data()?.role : null;
+        const userRole = userDoc.exists ? userDoc.data()?.role : null;
+        if (!["orders_manager", "admin", "orders"].includes(staffRole) && userRole !== "admin") {
           return res.status(403).json({ error: "FORBIDDEN", message: "ليس لديك صلاحية لتعديل حالة الطلب" });
         }
       }
@@ -1380,70 +1384,102 @@ async function startServer() {
 
       const orderRef = firestore.collection("orders").doc(orderId);
 
-      // Atomic Update with Referral Rewarding
+      // Atomic order status, one-time referral reward and customer notification.
       const updateResult = await firestore.runTransaction(async (transaction) => {
         const orderSnap = await transaction.get(orderRef);
-        if (!orderSnap.exists) {
-          throw new Error("ORDER_NOT_FOUND");
-        }
-        const currentData = orderSnap.data() || {};
-        const currentStatus = (currentData.status || "pending").toLowerCase();
+        if (!orderSnap.exists) throw new Error("ORDER_NOT_FOUND");
 
-        // Valid status transition rule enforcement:
-        // Do not allow completed orders to be reverted to pending or approved without owner
+        const currentData = orderSnap.data() || {};
+        const currentStatus = String(currentData.status || "pending").toLowerCase();
         if (currentStatus === "completed" && targetStatus !== "completed" && !isOwner) {
           throw new Error("COMPLETED_ORDER_IMMUTABLE");
         }
 
-        const updates: any = {
-          status: targetStatus,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        };
+        // Read all documents before writing anything in this Firestore transaction.
+        let userRef: FirebaseFirestore.DocumentReference | null = null;
+        let userSnap: FirebaseFirestore.DocumentSnapshot | null = null;
+        let referrerRef: FirebaseFirestore.DocumentReference | null = null;
+        let referrerSnap: FirebaseFirestore.DocumentSnapshot | null = null;
+        let shouldRewardReferral = false;
 
-        if (adminNote !== undefined) updates.adminNote = adminNote ? String(adminNote).trim() : null;
-        if (rejectionReason !== undefined) updates.rejectionReason = rejectionReason ? String(rejectionReason).trim() : null;
-        if (pinCode !== undefined) updates.pinCode = pinCode ? String(pinCode).trim() : null;
-        if (targetStatus === "completed") {
-          updates.completedAt = admin.firestore.FieldValue.serverTimestamp();
-        }
-
-        transaction.update(orderRef, updates);
-
-        // Atomic Referral Rewarding: Only on genuinely completed order, exactly once, 30 MRU
-        let referralRewarded = false;
         if (targetStatus === "completed" && currentData.userId && !currentData.isGuest) {
-          const userRef = firestore.collection("users").doc(currentData.userId);
-          const userSnap = await transaction.get(userRef);
-          if (userSnap.exists) {
-            const userData = userSnap.data() || {};
-            if (userData.referredBy && !userData.isReferralRewarded) {
-              const referrerRef = firestore.collection("users").doc(userData.referredBy);
-              const referrerSnap = await transaction.get(referrerRef);
-              if (referrerSnap.exists) {
-                const referrerData = referrerSnap.data() || {};
-                const currentEarnings = Number(referrerData.referralEarnings || 0);
-                const currentCount = Number(referrerData.referralsCount || 0);
-                const currentPoints = Number(referrerData.loyaltyPoints || 0);
-
-                transaction.update(userRef, {
-                  isReferralRewarded: true,
-                  firstCompletedOrderAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-
-                transaction.update(referrerRef, {
-                  referralsCount: currentCount + 1,
-                  referralEarnings: currentEarnings + 30,
-                  loyaltyPoints: currentPoints + 30,
-                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-
-                referralRewarded = true;
-              }
-            }
+          userRef = firestore.collection("users").doc(String(currentData.userId));
+          userSnap = await transaction.get(userRef);
+          const userData = userSnap.exists ? userSnap.data() || {} : {};
+          if (userData.referredBy && !userData.isReferralRewarded) {
+            referrerRef = firestore.collection("users").doc(String(userData.referredBy));
+            referrerSnap = await transaction.get(referrerRef);
+            shouldRewardReferral = Boolean(referrerSnap.exists);
           }
         }
 
-        return { success: true, referralRewarded };
+        const notificationRef = currentData.userId
+          ? firestore.collection("notifications").doc()
+          : null;
+        const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+        const updates: Record<string, any> = {
+          status: targetStatus,
+          updatedAt: serverTimestamp
+        };
+        if (adminNote !== undefined) updates.adminNote = adminNote ? String(adminNote).trim() : null;
+        if (rejectionReason !== undefined) updates.rejectionReason = rejectionReason ? String(rejectionReason).trim() : null;
+        if (pinCode !== undefined) updates.pinCode = pinCode ? String(pinCode).trim() : null;
+        if (targetStatus === "completed") updates.completedAt = serverTimestamp;
+
+        transaction.update(orderRef, updates);
+
+        if (shouldRewardReferral && userRef && userSnap && referrerRef && referrerSnap) {
+          const referrerData = referrerSnap.data() || {};
+          transaction.update(userRef, {
+            isReferralRewarded: true,
+            firstCompletedOrderAt: serverTimestamp
+          });
+          transaction.update(referrerRef, {
+            referralsCount: Number(referrerData.referralsCount || 0) + 1,
+            referralEarnings: Number(referrerData.referralEarnings || 0) + 30,
+            loyaltyPoints: Number(referrerData.loyaltyPoints || 0) + 30,
+            updatedAt: serverTimestamp
+          });
+        }
+
+        if (notificationRef) {
+          const orderNumber = orderId.slice(0, 8).toUpperCase();
+          const serviceName = currentData.serviceName || currentData.serviceType || "خدمة رقمية";
+          const note = adminNote ? String(adminNote).trim() : "";
+          const pin = pinCode ? String(pinCode).trim() : "";
+          const rejectReason = rejectionReason ? String(rejectionReason).trim() : "";
+          const titles: Record<string, string> = {
+            pending: "تم إرجاع طلبك للمراجعة",
+            approved: "تم قبول طلبك وبدء معالجته",
+            shipped: "تم شحن/إرسال طلبك",
+            completed: "تم إكمال طلبك بنجاح",
+            rejected: "تم رفض طلبك"
+          };
+          let body = `تم تحديث حالة طلبك رقم #${orderNumber}.`;
+          if (targetStatus === "completed") {
+            body = `اكتملت عملية شحن طلبك لخدمة (${serviceName}).${note ? ` ملاحظة: ${note}` : ""}${pin ? ` كود الشحن: ${pin}` : ""}`;
+          } else if (targetStatus === "approved") {
+            body = `تم قبول طلبك لخدمة (${serviceName}) وجاري تنفيذه.${note ? ` ملاحظة: ${note}` : ""}`;
+          } else if (targetStatus === "shipped") {
+            body = `تم شحن طلبك لخدمة (${serviceName}).${note ? ` ملاحظة: ${note}` : ""}`;
+          } else if (targetStatus === "rejected") {
+            body = `تم رفض الطلب رقم #${orderNumber}. سبب الرفض: ${rejectReason}`;
+          } else if (note) {
+            body += ` ملاحظة: ${note}`;
+          }
+
+          transaction.set(notificationRef, {
+            userId: currentData.userId,
+            orderId,
+            title: titles[targetStatus] || "تحديث على طلبك",
+            body,
+            read: false,
+            type: targetStatus === "completed" ? "success" : targetStatus === "rejected" ? "error" : "info",
+            createdAt: serverTimestamp
+          });
+        }
+
+        return { success: true, referralRewarded: shouldRewardReferral };
       });
 
       return res.json({ success: true, status: targetStatus, referralRewarded: updateResult.referralRewarded });
