@@ -662,6 +662,24 @@ export default function AdminDashboard() {
     return usersList.filter(u => u.reviewStatus === 'Under Review').length;
   }, [usersList]);
 
+  const submitKycDecision = async (targetUser: any, status: "approved" | "rejected", reason = "") => {
+    if (!user) throw new Error("جلسة الإدارة غير متاحة");
+    const idToken = await user.getIdToken();
+    const response = await fetch(`/api/admin/kyc/${encodeURIComponent(targetUser.id)}/status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`
+      },
+      body: JSON.stringify({ status, reason })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || "تعذرت معالجة طلب التوثيق");
+    }
+    return result;
+  };
+
   const handleApproveKyc = async (targetUser: any) => {
     if (!targetUser) return;
     if (!isOwner && !permissions.canManageKyc) {
@@ -670,63 +688,14 @@ export default function AdminDashboard() {
     }
     setKycActionLoading(true);
     try {
-      const nowIso = new Date().toISOString();
-      const reviewerIdentifier = user?.email || user?.uid || 'admin';
-      const reviewerName = profile?.name || user?.displayName || 'إدارة موري توب';
-
-      const userRef = doc(db, "users", targetUser.id);
-      await updateDoc(userRef, {
-        reviewStatus: 'Active',
-        isVerified: true,
-        kyc_completed: true,
-        verifiedAt: nowIso,
-        reviewedBy: reviewerIdentifier,
-        reviewedByName: reviewerName,
-        blockReason: ''
-      });
-
-      try {
-        await setDoc(doc(db, "kyc_requests", targetUser.id), {
-          reviewStatus: 'Active',
-          isVerified: true,
-          kyc_completed: true,
-          verifiedAt: nowIso,
-          reviewedBy: reviewerIdentifier,
-          reviewedByName: reviewerName
-        }, { merge: true });
-      } catch (e) {
-        console.warn("kyc_requests sync:", e);
-      }
-
-      await addDoc(collection(db, "notifications"), {
-        userId: targetUser.id,
-        title: "تهانينا! تم توثيق حسابك بنجاح 🎉",
-        message: "قامت إدارة منصة موري توب بمراجعة وثائق الهوية الخاصة بك وتوثيق حسابك رسمياً وحصولك على شارة التوثيق المعتمَدة.",
-        read: false,
-        createdAt: serverTimestamp()
-      });
-
-      // Immutable Audit Log
-      try {
-        await addDoc(collection(db, "audit_logs"), {
-          action: "KYC_APPROVED",
-          targetUserId: targetUser.id,
-          targetUserEmail: targetUser.email || targetUser.phoneNumber || "N/A",
-          performedBy: reviewerIdentifier,
-          performedByName: reviewerName,
-          timestamp: serverTimestamp()
-        });
-      } catch (auditErr) {
-        console.warn("Audit log write error:", auditErr);
-      }
-
+      await submitKycDecision(targetUser, "approved");
       showToast(`تم توثيق حساب ${targetUser.name || targetUser.email} بنجاح!`, "success");
       setIsKycModalOpen(false);
       setSelectedKycUser(null);
       await fetchUsers(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error("KYC Approve Error:", err);
-      showToast("فشل توثيق الحساب، يرجى إعادة المحاولة", "error");
+      showToast(err?.message || "فشل توثيق الحساب، يرجى إعادة المحاولة", "error");
     } finally {
       setKycActionLoading(false);
     }
@@ -744,66 +713,16 @@ export default function AdminDashboard() {
     }
     setKycActionLoading(true);
     try {
-      const nowIso = new Date().toISOString();
-      const reviewerIdentifier = user?.email || user?.uid || 'admin';
-      const reviewerName = profile?.name || user?.displayName || 'إدارة موري توب';
-
-      const userRef = doc(db, "users", targetUser.id);
-      await updateDoc(userRef, {
-        reviewStatus: 'Rejected',
-        isVerified: false,
-        kyc_completed: false,
-        blockReason: reason.trim(),
-        reviewedBy: reviewerIdentifier,
-        reviewedByName: reviewerName,
-        reviewedAt: nowIso
-      });
-
-      try {
-        await setDoc(doc(db, "kyc_requests", targetUser.id), {
-          reviewStatus: 'Rejected',
-          isVerified: false,
-          blockReason: reason.trim(),
-          reviewedBy: reviewerIdentifier,
-          reviewedByName: reviewerName,
-          reviewedAt: nowIso
-        }, { merge: true });
-      } catch (e) {
-        console.warn("kyc_requests sync:", e);
-      }
-
-      await addDoc(collection(db, "notifications"), {
-        userId: targetUser.id,
-        title: "تنبيه بخصوص طلب توثيق الحساب (KYC) ⚠️",
-        message: `نأسف لإبلاغك بأنه تعذر قبول طلب التوثيق بالبيانات الحالية للسبب التالي: ${reason.trim()}. يرجى إعادة رفع وثيقة واضحة وصحيحة.`,
-        read: false,
-        createdAt: serverTimestamp()
-      });
-
-      // Immutable Audit Log
-      try {
-        await addDoc(collection(db, "audit_logs"), {
-          action: "KYC_REJECTED",
-          targetUserId: targetUser.id,
-          targetUserEmail: targetUser.email || targetUser.phoneNumber || "N/A",
-          reason: reason.trim(),
-          performedBy: reviewerIdentifier,
-          performedByName: reviewerName,
-          timestamp: serverTimestamp()
-        });
-      } catch (auditErr) {
-        console.warn("Audit log write error:", auditErr);
-      }
-
+      await submitKycDecision(targetUser, "rejected", reason.trim());
       showToast(`تم رفض طلب توثيق ${targetUser.name || targetUser.email}`, "info");
       setIsKycRejectModalOpen(false);
       setIsKycModalOpen(false);
       setKycRejectReason("");
       setSelectedKycUser(null);
       await fetchUsers(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error("KYC Reject Error:", err);
-      showToast("فشل تحديث حالة الطلب", "error");
+      showToast(err?.message || "فشل تحديث حالة الطلب", "error");
     } finally {
       setKycActionLoading(false);
     }
