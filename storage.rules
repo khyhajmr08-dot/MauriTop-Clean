@@ -22,7 +22,9 @@ service firebase.storage {
     }
 
     match /kyc/{fileName} {
-      allow read: if true;
+      // Require a signed-in session for KYC reads. Permanent download URLs remain bearer links,
+      // so the application must only expose them to the account owner and authorized reviewers.
+      allow read: if request.auth != null;
       allow write: if false;
     }
 
