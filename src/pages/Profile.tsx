@@ -67,7 +67,7 @@ export default function Profile() {
           setWithdrawPhone(rawPhone.replace(/\D/g, "").slice(-8));
           setReferralCount(data.referralCount || data.referralsCount || 0);
           setLoyaltyPoints(data.loyaltyPoints || data.points || 0);
-          setIsVerified(!!data.isVerified || data.reviewStatus === 'Active');
+          setIsVerified(data.isVerified === true);
         }
       } catch (error) {
         console.error("Profile fetch error:", error);
