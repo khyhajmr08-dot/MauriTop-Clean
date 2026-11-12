@@ -143,9 +143,10 @@ service cloud.firestore {
 
     // --- WITHDRAWALS ---
     match /withdrawals/{withdrawalId} {
-      allow read: if isOwner() || (isSignedIn() && resource.data.userId == request.auth.uid);
-      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
-      allow update, delete: if isOwner();
+      allow read: if isOwner() || hasStaffRole('finance_manager') || isUserRole('admin') ||
+                    (isSignedIn() && resource.data.userId == request.auth.uid);
+      // Creation, point reservation, approval and refunds are performed by trusted server transactions only.
+      allow create, update, delete: if false;
     }
 
     // --- KYC REQUESTS ---
